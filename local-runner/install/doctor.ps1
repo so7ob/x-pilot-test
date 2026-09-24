@@ -8,11 +8,16 @@
     2. Runner package health (package.json, dist/index.js, node_modules, launcher).
     3. The HKCU registry key and its default value (what Chrome actually reads).
     4. The host manifest bytes: UTF-8 BOM detection (issue #6), JSON validity,
-       required fields, allowed_origins, and launcher existence.
-    5. A LIVE framed PING against the real launch chain, twice: directly with
-       node dist\index.js, and through the rendered x-pilot-runner.cmd - the
-       exact binary Chrome launches. stdout is only read as protocol frames.
-    6. Tails of runner.log and host-stderr.log.
+       required fields, allowed_origins, launcher existence, and whether the
+       registered launcher is the compiled .exe (direct launch, issue #9) or
+       the legacy .cmd (cmd.exe pipe redirection chain).
+    5. A LIVE framed PING against the real launch chain, three times: directly
+       with node dist\index.js, through the rendered x-pilot-runner.cmd, and
+       through x-pilot-runner.exe with Chrome-style arguments (caller origin
+       + --parent-window) - the direct-launch path. stdout is only read as
+       protocol frames.
+    6. Tails of runner.log and host-stderr.log (the runner log now records
+       the caller origin per session, so Chrome launches are identifiable).
   Prints [PASS]/[FAIL]/[WARN] lines. Exit code 0 only when no check failed.
 
 .EXAMPLE
@@ -78,6 +83,9 @@ foreach ($pair in @(@('package.json', $packageJson), @('dist\index.js (built hos
   if (Test-Path $target) { Write-Pass "$label present." }
   else { Write-FailCheck "$label MISSING at '$target'. Run install.ps1 (or repair.ps1)." }
 }
+$launcherExePath = Join-Path $runnerHome 'x-pilot-runner.exe'
+if (Test-Path $launcherExePath) { Write-Pass 'x-pilot-runner.exe present (Chrome direct-launch path available).' }
+else { Write-WarnCheck 'x-pilot-runner.exe is missing: install fell back to the legacy .cmd launcher. Re-run install.ps1 (v1.5.3+) so Chrome can use the direct-launch path with inherited pipe handles.' }
 
 # ------------------------------------------------------------- 3/6 Registry
 Write-Step '3/6 Chrome native messaging registration (HKCU, what Chrome reads)'
@@ -102,6 +110,7 @@ if ($null -eq $registryKeyHandle) {
 
 # ------------------------------------------------------------- 4/6 Manifest
 Write-Step '4/6 Host manifest file (BOM check is the v1.5.1 bug, issue #6)'
+$doctorExtId = $null
 if (-not (Test-Path $manifestPath)) {
   Write-FailCheck "Manifest not found: $manifestPath"
 } else {
@@ -124,10 +133,17 @@ if (-not (Test-Path $manifestPath)) {
     if ($manifest.path) {
       if (Test-Path $manifest.path) { Write-Pass "Manifest path -> $($manifest.path)" }
       else { Write-FailCheck "Manifest path points to a missing launcher: $($manifest.path). Run repair.ps1." }
+      if ($manifest.path -like '*.cmd' -or $manifest.path -like '*.bat') {
+        Write-WarnCheck "Registered launcher is a batch file ($($manifest.path)): Chrome must launch it through the fragile cmd.exe pipe redirection chain (issue #9). Re-run install.ps1 (v1.5.3+) to register the compiled x-pilot-runner.exe."
+      } elseif ($manifest.path -like '*.exe') {
+        Write-Pass 'Registered launcher is an .exe: Chrome uses the direct-launch path (issue #9 fix).'
+      }
     } else {
       Write-FailCheck 'Manifest has no path field.'
     }
     if ($manifest.allowed_origins) {
+      $firstOrigin = @($manifest.allowed_origins)[0]
+      if ($firstOrigin -match '^chrome-extension://([a-p]{32})/$') { $doctorExtId = $Matches[1] }
       foreach ($origin in @($manifest.allowed_origins)) {
         Write-Host "    allowed origin: $origin"
         if ($origin -notmatch '^chrome-extension://[a-p]{32}/$') { Write-WarnCheck "Origin '$origin' does not look like chrome-extension://<32 chars a-p>/. Compare it with the ID on chrome://extensions (Developer mode). A mismatch makes Chrome forbid the host." }
@@ -151,7 +167,8 @@ if ($livePossible) {
 const { spawn } = require('node:child_process');
 const path = require('node:path');
 const runnerHome = process.argv[2];
-const mode = process.argv[3]; // 'direct' | 'launcher'
+const mode = process.argv[3]; // 'direct' | 'launcher' | 'exe'
+const extId = process.argv[4]; // extension id for Chrome-style arguments
 
 function frameRequest(obj) {
   const body = Buffer.from(JSON.stringify(obj), 'utf8');
@@ -175,6 +192,14 @@ function parseFrames(buffer) {
 function launch() {
   if (mode === 'direct') {
     return spawn(process.execPath, [path.join(runnerHome, 'dist', 'index.js')], { stdio: ['pipe', 'pipe', 'pipe'] });
+  }
+  if (mode === 'exe') {
+    // Chrome's direct-launch path (LaunchContext::LaunchInBackground in
+    // chrome/browser/extensions/api/messaging/launch_context.cc): the exe
+    // receives the caller origin as the first argument and the
+    // --parent-window handle argument. Reproduce that exact argv.
+    const origin = 'chrome-extension://' + (extId || 'geppjelfpfleebmfgaiciiholmdliipn') + '/';
+    return spawn(path.join(runnerHome, 'x-pilot-runner.exe'), [origin, '--parent-window=0'], { stdio: ['pipe', 'pipe', 'pipe'] });
   }
   return spawn('cmd.exe', ['/d', '/s', '/c', path.join(runnerHome, 'x-pilot-runner.cmd')], { stdio: ['pipe', 'pipe', 'pipe'] });
 }
@@ -237,10 +262,15 @@ function exchange() {
     if ($LASTEXITCODE -eq 0) { Write-Pass 'Host answered a framed PING when launched directly with node.' }
     else { Write-FailCheck 'Host did NOT answer a framed PING when launched directly (see HOST-STDERR above; usually a missing build or dependency).' }
 
-    Write-Host '  (b) launcher: cmd.exe /c x-pilot-runner.cmd (what Chrome launches)'
+    Write-Host '  (b) launcher: cmd.exe /c x-pilot-runner.cmd (legacy launch chain)'
     & node $hostTestJs $runnerHome launcher 2>&1 | ForEach-Object { Write-Host "      $_" }
-    if ($LASTEXITCODE -eq 0) { Write-Pass 'Host answered a framed PING through the rendered launcher - the exact chain Chrome runs.' }
+    if ($LASTEXITCODE -eq 0) { Write-Pass 'Host answered a framed PING through the rendered .cmd launcher.' }
     else { Write-FailCheck 'Launcher test failed. If (a) passed, the .cmd layer is broken (node path moved?); see host-stderr.log below.' }
+
+    Write-Host '  (c) chrome-style: x-pilot-runner.exe chrome-extension://<id>/ --parent-window=0 (the direct-launch path)'
+    & node $hostTestJs $runnerHome exe $(if ($doctorExtId) { $doctorExtId } else { 'geppjelfpfleebmfgaiciiholmdliipn' }) 2>&1 | ForEach-Object { Write-Host "      $_" }
+    if ($LASTEXITCODE -eq 0) { Write-Pass 'Host answered a framed PING through the compiled .exe with Chrome-style origin arguments (direct-launch path).' }
+    else { Write-FailCheck 'Chrome-style .exe test failed. If (a) passed, the .exe launcher layer is broken (node resolution?); see HOST-STDERR above and host-stderr.log. Re-run install.ps1 to recompile it.' }
   } finally {
     Remove-Item -Path $hostTestJs -Force -ErrorAction SilentlyContinue | Out-Null
   }
@@ -256,9 +286,12 @@ foreach ($pair in @(@('runner.log', $runnerLog), @('host-stderr.log (latest laun
   $label = $pair[0]; $target = $pair[1]
   if (Test-Path $target) {
     Write-Host "  last lines of $label :"
-    Get-Content -Path $target -Tail 5 | ForEach-Object { Write-Host "    $_" }
-    if ($label -eq 'runner.log' -and -not (Select-String -Path $target -Pattern 'X-Pilot Local Runner starting' -Quiet)) {
-      Write-WarnCheck 'runner.log has no "X-Pilot Local Runner starting" line yet: the host process has never actually started on this machine.'
+    Get-Content -Path $target -Tail 12 | ForEach-Object { Write-Host "    $_" }
+    if ($label -eq 'runner.log') {
+      if (-not (Select-String -Path $target -Pattern 'X-Pilot Local Runner starting' -Quiet)) {
+        Write-WarnCheck 'runner.log has no "X-Pilot Local Runner starting" line yet: the host process has never actually started on this machine.'
+      }
+      Write-Host '    hint: sessions with a "host process context" line carrying callerOrigin = chrome-extension://... were launched by Chrome; the shutdown detail reports framesReceived/responsesSent, so a session with framesReceived 0 never received a message.' -ForegroundColor DarkGray
     }
   } else {
     Write-WarnCheck "$label not found ($target)."

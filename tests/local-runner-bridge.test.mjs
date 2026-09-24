@@ -87,3 +87,33 @@ test('launch failure maps to the LAUNCH_FAILED runner state', async () => {
   assert.equal(result.ok, false);
   assert.equal(localRunnerBridge.describe().state, 'LAUNCH_FAILED');
 });
+
+test('Chrome generic communication failure maps to RUNNER_PIPE_BROKEN and keeps the raw text (issue #9)', async () => {
+  localRunnerBridge.resetForTest();
+  const { port, factory } = freshBridgeWithPort();
+  // Make PING hang so it is in flight when Chrome tears the pipe down.
+  port.postMessage = (message) => { port.sent.push(message); /* no response */ };
+  const pending = localRunnerBridge.testConnection('ws-1', 'ws-1', factory);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  port.emitDisconnect('Error when communicating with the native messaging host.');
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'RUNNER_PIPE_BROKEN', 'the generic Chrome error must surface as a distinct, localized code');
+  assert.equal(result.message, 'Error when communicating with the native messaging host.', 'the raw Chrome text is preserved for diagnosis');
+  const summary = localRunnerBridge.describe();
+  assert.equal(summary.state, 'DISCONNECTED');
+  assert.equal(summary.lastErrorCode, 'RUNNER_PIPE_BROKEN');
+});
+
+test('Chrome "Failed to start native messaging host." maps to RUNNER_LAUNCH_FAILED', async () => {
+  localRunnerBridge.resetForTest();
+  const { port, factory } = freshBridgeWithPort();
+  port.postMessage = (message) => { port.sent.push(message); /* no response */ };
+  const pending = localRunnerBridge.testConnection('ws-1', 'ws-1', factory);
+  await new Promise((resolve) => setTimeout(resolve, 10));
+  port.emitDisconnect('Failed to start native messaging host.');
+  const result = await pending;
+  assert.equal(result.ok, false);
+  assert.equal(result.code, 'RUNNER_LAUNCH_FAILED');
+  assert.equal(localRunnerBridge.describe().state, 'LAUNCH_FAILED');
+});

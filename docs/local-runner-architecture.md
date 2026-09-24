@@ -63,8 +63,22 @@ used.
 
 - Host name: `com.so7ob.x_pilot_runner`, registered per-user (HKCU) by
   `local-runner/install/install.ps1`.
+- Manifest `path` points at the compiled `x-pilot-runner.exe` (v1.5.3, issue
+  #9): Chrome launches `.exe` hosts through its direct-launch path
+  (CreateProcess with inherited pipe handles). The exe is compiled at install
+  time from `install/x-pilot-runner.cs` with the .NET Framework `csc.exe` that
+  ships with Windows; it spawns `node dist\index.js` with stdin/stdout passed
+  through untouched (they are the protocol pipes) and stderr pumped to
+  `host-stderr.log`. A `.cmd` launcher remains as the fallback when csc.exe
+  is unavailable (Chrome then uses the legacy cmd.exe pipe-redirection path).
 - Manifest `allowed_origins` contains the **exact** extension id (no
   wildcards).
+- Launch observability: the host logs a `host process context` line per
+  session (raw argv, the `chrome-extension://<id>/` caller origin Chrome
+  passes, stdio fd kinds), a `request received`/`response sent` pair per
+  message, and `framesReceived`/`responsesSent` counters on shutdown — so
+  runner.log alone distinguishes a Chrome launch from a manual/doctor launch
+  and proves whether any message was delivered before the pipe died.
 - Wire format per Chrome's spec: UTF-8 JSON framed with a 4-byte length header
   in native byte order. The length counts **bytes**, not characters — verified
   with Arabic and emoji payloads on both sides (`tests/runner-protocol.test.mjs`,
