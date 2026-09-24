@@ -3,3 +3,7 @@ dist/
 *.tsbuildinfo
 *.zip
 .DS_Store
+# X-Pilot Local Runner build output and logs (login profiles live outside the repo by design)
+local-runner/dist/
+local-runner/logs/
+local-runner/x-pilot-runner.cmd
