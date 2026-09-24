@@ -30,6 +30,12 @@ export const errorTranslationKeys: Record<string, string> = {
   RUNNER_DISCONNECTED: 'errors.runnerDisconnected',
   RUNNER_TIMEOUT: 'errors.runnerTimeout',
   RUNNER_CONTENT_MISMATCH: 'errors.runnerContentMismatch',
+  RUNNER_PIPE_BROKEN: 'errors.runnerPipeBroken',
+  // Raw disconnect strings Chrome itself reports (native_message_host.cc);
+  // mapped so a raw lastError message is still localized for the user.
+  'Error when communicating with the native messaging host.': 'errors.runnerPipeBroken',
+  'Failed to start native messaging host.': 'errors.runnerLaunchFailed',
+  'Native host has exited.': 'errors.runnerDisconnected',
 };
 
 export function errorTranslationKey(message?: string): string | undefined {

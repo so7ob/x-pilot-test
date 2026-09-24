@@ -75,6 +75,27 @@ function initialState(): BridgeState {
 const RECONNECT_MAX_ATTEMPTS = 3;
 const RECONNECT_BACKOFF_MS = 600;
 
+/**
+ * Raw disconnect messages Chrome reports through port.onDisconnect /
+ * chrome.runtime.lastError (see Chromium native_message_host.cc). They are
+ * mapped to distinct codes so the UI can localize them AND still show the
+ * original text for diagnosis (issue #9). RUNNER_PIPE_BROKEN and
+ * RUNNER_DISCONNECTED are bridge-local (never wire codes): the runner
+ * protocol stays byte-identical on both sides, enforced by the
+ * protocol-sync tests.
+ */
+type ChromeMappedErrorCode = RunnerResultCode | 'RUNNER_PIPE_BROKEN' | 'RUNNER_DISCONNECTED';
+
+const CHROME_NATIVE_HOST_ERRORS: Record<string, ChromeMappedErrorCode> = {
+  'Error when communicating with the native messaging host.': 'RUNNER_PIPE_BROKEN',
+  'Failed to start native messaging host.': 'RUNNER_LAUNCH_FAILED',
+  'Native host has exited.': 'RUNNER_DISCONNECTED',
+};
+
+function chromeErrorToCode(message: string): ChromeMappedErrorCode | undefined {
+  return CHROME_NATIVE_HOST_ERRORS[message];
+}
+
 let bridgeState: BridgeState = initialState();
 
 function describeState(): RunnerStatusSummary {
@@ -211,7 +232,7 @@ async function request(command: RunnerCommand, options: { workspaceId: string; p
 
 export const localRunnerBridge = {
   /** Sends PING + GET_INFO and returns the runner info; updates cached status. */
-  async testConnection(workspaceId = 'x-pilot-global', profileId = 'x-pilot-global', factory?: PortFactory): Promise<{ ok: boolean; info?: RunnerInfo; code?: RunnerResultCode; message?: string }> {
+  async testConnection(workspaceId = 'x-pilot-global', profileId = 'x-pilot-global', factory?: PortFactory): Promise<{ ok: boolean; info?: RunnerInfo; code?: ChromeMappedErrorCode; message?: string }> {
     try {
       const ping = await request('PING', { workspaceId, profileId, factory });
       if (ping.code && ping.code !== 'RUNNER_OK') return { ok: false, code: ping.code, message: ping.message };
@@ -227,8 +248,9 @@ export const localRunnerBridge = {
       return { ok: false, code: info.code, message: info.message };
     } catch (error) {
       const message = error instanceof Error ? error.message : 'RUNNER_ERROR';
-      setState({ connected: false, state: message === 'RUNNER_LAUNCH_FAILED' ? 'LAUNCH_FAILED' : 'DISCONNECTED', lastErrorCode: message, lastErrorAt: Date.now(), lastCheckedAt: Date.now() });
-      return { ok: false, message };
+      const code = chromeErrorToCode(message);
+      setState({ connected: false, state: code === 'RUNNER_LAUNCH_FAILED' || message === 'RUNNER_LAUNCH_FAILED' ? 'LAUNCH_FAILED' : 'DISCONNECTED', lastErrorCode: code ?? message, lastErrorAt: Date.now(), lastCheckedAt: Date.now() });
+      return { ok: false, code, message };
     }
   },
 
