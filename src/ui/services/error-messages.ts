@@ -36,6 +36,11 @@ export const errorTranslationKeys: Record<string, string> = {
   'Error when communicating with the native messaging host.': 'errors.runnerPipeBroken',
   'Failed to start native messaging host.': 'errors.runnerLaunchFailed',
   'Native host has exited.': 'errors.runnerDisconnected',
+  // Raw content-script delivery failure Chrome itself reports (tabs.sendMessage
+  // to a tab with no listener — e.g. the script crashed or was never injected).
+  // Mapped so the preflight/dry-run/diagnostics surfaces stay actionable
+  // (issue #15).
+  'Could not establish connection. Receiving end does not exist.': 'errors.contentScriptUnavailable',
 };
 
 export function errorTranslationKey(message?: string): string | undefined {

@@ -1,4 +1,5 @@
 import type { DiagnosticsResult } from '../../domain/models';
+import { toUserFacingMessage } from '../services/error-messages';
 import { formatDateTime, useI18n } from '../../i18n';
 
 const checkLabelKeys: Record<string, string> = {
@@ -13,6 +14,10 @@ const checkLabelKeys: Record<string, string> = {
   'post-button': 'diagnostics.postButtonCheck',
   permissions: 'diagnostics.permissionsCheck',
   'automation-tab': 'diagnostics.automationTabCheck',
+  // LOCAL_RUNNER-mode checks (issue #15): these render the moment the user
+  // switches the execution engine, so they must have proper labels.
+  'runner-connection': 'diagnostics.runnerConnectionCheck',
+  'runner-account': 'diagnostics.runnerAccountCheck',
 };
 
 function localizedDetail(details: string | undefined, t: (key: string, params?: Record<string, string | number>) => string): string | undefined {
@@ -29,7 +34,9 @@ function localizedDetail(details: string | undefined, t: (key: string, params?: 
   if (details === 'لا يوجد Alarm مطلوب حاليًا') return t('diagnostics.noAlarmRequired'); /* i18n-exempt: internal-code bridge — matches background diagnostic codes, renders t() only */
   if (details === 'لا توجد جلسة أتمتة نشطة') return t('diagnostics.noAutomationSession'); /* i18n-exempt: internal-code bridge — matches background diagnostic codes, renders t() only */
   if (details === 'التبويب المسجل غير موجود') return t('diagnostics.registeredTabMissing'); /* i18n-exempt: internal-code bridge — matches background diagnostic codes, renders t() only */
-  return details;
+  // Runner failure codes (RUNNER_*) and raw Chrome strings are localized
+  // through the shared error map; version strings pass through unchanged.
+  return toUserFacingMessage(details) ?? details;
 }
 
 export function DiagnosticsTab({ result, onRun }: { result: DiagnosticsResult | null; onRun: () => void }) {
