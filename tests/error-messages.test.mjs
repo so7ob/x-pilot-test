@@ -28,3 +28,18 @@ test('raw Chrome native-host disconnect messages localize for the user (issue #9
     'انقطعت قناة الاتصال مع Local Runner. شغّل install\\doctor.ps1 من حزمة البرنامج المحلي للتشخيص الكامل ثم أعد المحاولة.',
   );
 });
+
+test("raw content-script delivery failure localizes for the user (issue #15)", async () => {
+  await setLanguagePreference('EN');
+  assert.equal(
+    getUserFacingMessage('Could not establish connection. Receiving end does not exist.'),
+    'Could not reach the page script in the X tab (it did not run in the browser). Reload the extension from chrome://extensions and retry; if it keeps failing, reinstall the updated extension package (1.5.5+).',
+  );
+  await setLanguagePreference('AR');
+  assert.equal(
+    getUserFacingMessage('Could not establish connection. Receiving end does not exist.'),
+    'تعذّر الوصول إلى سكربت الصفحة في تبويب X (لم يُشغَّل في المتصفح). أعد تحميل الإضافة من chrome://extensions ثم أعد المحاولة، وإن استمر الخطأ فأعد تثبيت حزمة الإضافة المحدثة (1.5.5+).',
+  );
+  // Unrelated messages pass through untouched.
+  assert.equal(getUserFacingMessage('some unrelated failure'), 'some unrelated failure');
+});

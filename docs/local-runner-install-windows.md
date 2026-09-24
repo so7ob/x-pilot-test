@@ -71,7 +71,14 @@
    3. Set the **expected account** for the workspace (handle without `@`).
       Publishing stops if the runner profile is signed in as a different
       account.
-   4. Select **LOCAL_RUNNER** as the execution engine.
+   4. Select **LOCAL_RUNNER** as the execution engine — **required** for
+      publishing through the runner. The default engine is "Chrome tab"
+      (the current browser), and it is never switched implicitly. Since
+      v1.5.5 the extension reminds you with a notice right after a
+      successful login setup while the engine is still on "Chrome tab".
+      With LOCAL_RUNNER selected, Startup tests (preflight/dry run),
+      diagnostics, and publishing all run through the runner's headless
+      browser.
 
 ## Repair
 
@@ -140,6 +147,8 @@ Chrome via `chrome://restart`).
 | Login expired (`RUNNER_LOGIN_REQUIRED`) | Runner profile session invalid | Press Set up login again. |
 | X login form stalls silently after entering the username (≤ v1.5.3) | The login window exposed `navigator.webdriver === true` (Playwright `--enable-automation`, no anti-automation flags in headed mode) — X's login flow refuses to advance in automation-flagged browsers | **Install v1.5.4** (issue #12: anti-automation launch profile in both modes). |
 | Google sign-in in the login window: «تعذّر تسجيل الدخول — قد يكون هذا المتصفّح أو التطبيق غير آمن» / "This browser or app may not be secure" (≤ v1.5.3) | Google refuses automation-flagged and generic Chromium builds; the X login page offers "Continue with Google" | **Install v1.5.4** — the login window now prefers the installed branded Google Chrome (`channel: 'chrome'`) with automation marks removed. If you have no branded Chrome installed, the runner logs a fallback warning and X's email login still works, but Google sign-in may be refused. |
+| Startup tests / diagnostics fail with `Could not establish connection. Receiving end does not exist.` (≤ v1.5.4) | The extension's content script shipped as an **ES module bundle** in v1.5.0–v1.5.4; MV3 content scripts run as classic scripts, so it crashed with `SyntaxError: Cannot use import statement outside a module` and never installed its message listener (issue #15). All CHROME_TAB-engine checks (X session / Adapter / Composer / post button) then report this raw Chrome error | **Install the v1.5.5 extension package** (the runner package is unchanged) and reload it in chrome://extensions. If you meant to publish through the runner, also select **LOCAL_RUNNER** as the execution engine. |
+| Preflight/dry run/publishing drive a tab in your own Chrome although the runner is installed and logged in | The execution engine is still on the default "Chrome tab"; the engine is pinned per session and never switches implicitly | Select **LOCAL_RUNNER** in Side Panel → Settings → Local Runner → Execution engine (v1.5.5 shows a reminder notice right after a successful login setup). |
 | Profile in use (`RUNNER_PROFILE_LOCKED`) | Another process/session owns the profile | Close the other session (or login window) and retry. |
 | Account mismatch (`RUNNER_ACCOUNT_MISMATCH`) | Signed-in account ≠ workspace expected account | Fix the login or update the expected account. |
 
@@ -156,6 +165,16 @@ Chrome via `chrome://restart`).
   `x-pilot-runner.exe` on the direct-launch path. Re-run `install.ps1`, then
   `install\doctor.ps1`, then **Test connection** to confirm the full path
   end-to-end.
+- v1.5.5 (issue #15): the CHROME_TAB engine shipped completely dead in
+  v1.5.0–v1.5.4 — the content script was emitted as an ES module bundle
+  (top-level `import` from a shared chunk) while MV3 content scripts are
+  classic scripts, so every engine check failed with
+  `Could not establish connection. Receiving end does not exist.`
+  Verified against the released zips: v1.5.0–v1.5.4 all carried the broken
+  `content.js`; v1.4.0 was self-contained. Fixed by building the content
+  script as a single self-contained IIFE bundle in a dedicated second Vite
+  pass; proven by `node --check` classic-script parsing and build contracts.
+  Runner-side: zero code changes in this release.
 - v1.5.4 (issue #12): the login window's automation marks were measured on
   real Chromium (`navigator.webdriver = true` with the v1.5.3 options,
   `undefined` after the fix) and the new `channel: 'chrome'` preference is

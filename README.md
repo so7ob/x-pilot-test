@@ -122,6 +122,8 @@ npm run build
 - ملفات الدخول خاصة بـ Runner وخارج المستودع (`%LOCALAPPDATA%\X-Pilot\Runner`)، وكل مساحة عمل مرتبطة بحساب متوقع يُفحص قبل كل نشر.
 - دفتر عمليات دائم داخل Runner يمنع تكرار النشر (نفس `operationId` يعيد النتيجة المسجلة ولا ينفّذ مجددًا).
 - المحرك مثبّت للجلسة؛ لا رجوع تلقائي إلى CHROME_TAB عند فقدان الاتصال — تُوقف العملية بسبب واضح.
+- **فعّل المحرك يدويًا**: الافتراضي هو «تبويب Chrome»؛ بعد إتمام تثبيت Runner وتسجيل الدخول اختر **Local Runner** من قائمة «محرك التنفيذ» في بطاقة البرنامج المحلي (الإعدادات) — منذ v1.5.5 تذكّرك الإضافة بذلك بعد نجاح إعداد الدخول.
+- منذ v1.5.5 يعمل محرك «تبويب Chrome» مجددًا: سكربت المحتوى كان يُشحن كوحدة ES في v1.5.0–v1.5.4 فينهار كسكربت كلاسيكي («Cannot use import statement outside a module») ويفشل كل فحص بـ«Could not establish connection. Receiving end does not exist.» (المشكلة رقم 15) — يُبنى الآن كحزمة IIFE واحدة self-contained.
 
 التثبيت على Windows: راجع [docs/local-runner-install-windows.md](docs/local-runner-install-windows.md). التطوير والاختبار: `cd local-runner && npm install && npm run build && npm test`.
 
@@ -140,6 +142,7 @@ npm run build
 - نتيجة النشر تستعمل مؤشرًا محافظًا (`PUBLISHED_UNVERIFIED`) عندما لا يتوفر دليل مرتبط بالمحاولة (استجابة CreateTweet أو رابط جديد بعد الضغط).
 - واجهة Refresh Bank وExport/Import وRecovery الكامل بعد كل سيناريو Restart ستكتمل في المراحل التالية.
 - لا تبدأ جلسة غير مكتملة تلقائيًا بعد إعادة التشغيل دون إضافة مسار Resume صريح في الواجهة.
+- محرك «تبويب Chrome» كان معطلًا بالكامل في v1.5.0–v1.5.4 (سكربت محتوى ES Module — المشكلة رقم 15، أُصلح في v1.5.5). إن ظهر «Could not establish connection. Receiving end does not exist.» فأعد تحميل الإضافة من chrome://extensions وأعد المحاولة.
 - مثبّت Local Runner على Windows: شُغّل فعليًا على جهاز Windows حقيقي — انهار v1.5.0 على PowerShell 5.1 (أُصلح في v1.5.1)، ثم فشل «اختبار الاتصال» بخطأ Chrome العام بسبب BOM في الـmanifest (أُصلح في v1.5.2)، ثم أثبتت السجلات أن المضيف يُطلق لكن قناة cmd.exe تنكسر (أُصلح في v1.5.3 بتسجيل `.exe` المُجمّع على مسار الإطلاق المباشر + مراقبة كاملة للسجلات). شغّل `install.ps1` ثم `install\doctor.ps1` ثم «اختبار الاتصال» للتحقق. كذلك لم يُجرَ أي نشر على حساب حقيقي، ولم يُختبر تجميع csc.exe على Windows فعلي بعد (التراجع الآمن إلى `.cmd` يبقي التثبيت صالحًا).
 - استمرار الجدولة مرتبط بتشغيل Chrome (الإضافة تملك الجدولة؛ Runner ليس خدمة خلفية مستقلة).
 
