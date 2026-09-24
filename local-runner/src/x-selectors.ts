@@ -85,7 +85,7 @@ export function accountFromProfileHref(href: string): string | undefined {
   const match = href.match(/^\/(?:i\/)?([A-Za-z0-9_]{1,15})(?:\/|$|\?)/);
   const handle = match?.[1];
   if (!handle || ['home', 'i', 'explore', 'notifications', 'messages', 'bookmarks', 'settings', 'search', 'compose', 'intent'].includes(handle.toLowerCase())) return undefined;
-  return handle;
+  return handle.toLowerCase();
 }
 
 /**

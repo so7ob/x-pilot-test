@@ -416,7 +416,16 @@ async function processCurrentItem(): Promise<void> {
       // duplicate request can never trigger a second post click.
       const runnerResult = await localRunnerBridge.publish({ workspaceId: context.workspaceId, profileId: context.profileId, operationId, targetUrl: item.targetUrl, expectedAccount: context.expectedAccount, expectedContent });
       await updateRuntimeState((current) => ({ ...current, queue: current.queue.map((candidate) => candidate.id === item.id && candidate.publishIntentId === operationId ? { ...candidate, publishSubmittedAt: Date.now(), updatedAt: Date.now() } : candidate) }));
-      if (runnerResult.outcome === 'FAILED_BEFORE_SUBMIT' || runnerResult.outcome === 'REJECTED') throw new Error(runnerResult.reason ?? 'PUBLISH_FAILED');
+      if (runnerResult.outcome === 'FAILED_BEFORE_SUBMIT' || runnerResult.outcome === 'REJECTED') {
+        const reason = runnerResult.reason ?? 'PUBLISH_FAILED';
+        // The durable runner ledger PROVES no post was created (a definite
+        // pre-submit failure, or an explicit X-side refusal recorded with the
+        // operation). Clear the publish-intent markers so the item settles
+        // through the normal failure path instead of the uncertain handler.
+        await updateRuntimeState((current) => ({ ...current, queue: current.queue.map((candidate) => candidate.id === item.id && candidate.publishIntentId === operationId ? { ...candidate, publishIntentId: undefined, publishStartedAt: undefined, publishSubmittedAt: undefined } : candidate) }));
+        if (reason === 'RUNNER_DAILY_LIMIT') throw new Error('X_DAILY_POST_LIMIT_REACHED');
+        throw new Error(runnerResult.outcome === 'REJECTED' ? `RUNNER_REJECTED:${reason}` : reason);
+      }
       // CONFIRMED → verified success with attempt-scoped evidence.
       // UNVERIFIED → routed through the conservative uncertain handler
       // (PUBLISHED_UNVERIFIED + PAUSED) instead of advancing blindly.
@@ -465,7 +474,7 @@ async function processCurrentItem(): Promise<void> {
       const pausedState = await updateRuntimeState((currentState) => ({
         ...currentState,
         queue: currentState.queue.map((candidate) => candidate.id === item.id && candidate.operationId === operationId
-          ? { ...candidate, status: 'PENDING', attempts: item.attempts, lastError: message, operationId: undefined, updatedAt: Date.now() }
+          ? { ...candidate, status: 'PENDING', attempts: item.attempts, lastError: message, operationId: undefined, publishIntentId: undefined, publishStartedAt: undefined, publishSubmittedAt: undefined, updatedAt: Date.now() }
           : candidate),
         session: currentState.session ? { ...currentState.session, status: 'PAUSED', currentItemId: item.id, nextRunAt: undefined, updatedAt: Date.now() } : null,
         history: [...currentState.history, { id: crypto.randomUUID(), workspaceId: currentState.workspaceId, sessionId: session.id, queueItemId: item.id, link: item.targetUrl, sourceUrl: item.targetUrl, timestamp: Date.now(), attemptNumber: item.attempts, action: 'PUBLISH', result: 'PAUSED', error: message }]
@@ -511,7 +520,7 @@ async function processCurrentItem(): Promise<void> {
       await restoreActiveTab(previousActiveTabId);
       return;
     }
-    const exhausted = !latestItem || latestItem.attempts >= session.maxRetries + 1;
+    const exhausted = message.startsWith('RUNNER_REJECTED') || !latestItem || latestItem.attempts >= session.maxRetries + 1;
     const failedStatus = exhausted ? 'FAILED' : 'PENDING';
     const nextItem = exhausted && session.failureBehavior === 'CONTINUE' ? getNextPendingItem(current.queue, item.id) : undefined;
     const nextRunAt = !exhausted || nextItem ? Date.now() + session.intervalMinutes * 60_000 : undefined;

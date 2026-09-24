@@ -142,6 +142,10 @@ function handleIncoming(message: unknown): void {
       bridgeState.info = typed.result as unknown as RunnerInfo;
       setState({ connected: true, state: 'CONNECTED', lastErrorCode: undefined });
     }
+    // Surface the runner-detected account to the UI after inspections,
+    // publishes, or connection tests (no I/O on the polling path).
+    const detectedAccount = (typed.result as { detectedAccount?: unknown } | undefined)?.detectedAccount;
+    if (typeof detectedAccount === 'string' && detectedAccount) setState({ detectedAccount: detectedAccount.toLowerCase() });
     pending.resolve(typed);
     return;
   }
@@ -215,7 +219,8 @@ export const localRunnerBridge = {
       if (info.code === 'RUNNER_OK') {
         bridgeState.info = info.result as unknown as RunnerInfo;
         const compatible = bridgeState.info.protocolVersion === RUNNER_PROTOCOL_VERSION;
-        setState({ connected: true, state: compatible ? 'CONNECTED' : 'PROTOCOL_MISMATCH', protocolVersion: bridgeState.info.protocolVersion, protocolCompatible: compatible, runnerVersion: bridgeState.info.runnerVersion, lastErrorCode: undefined, lastCheckedAt: Date.now() });
+        const profileAccount = bridgeState.info.profiles?.find((profile) => profile.profileId === profileId)?.account;
+        setState({ connected: true, state: compatible ? 'CONNECTED' : 'PROTOCOL_MISMATCH', protocolVersion: bridgeState.info.protocolVersion, protocolCompatible: compatible, runnerVersion: bridgeState.info.runnerVersion, lastErrorCode: undefined, lastCheckedAt: Date.now(), ...(profileAccount ? { detectedAccount: profileAccount.toLowerCase() } : {}) });
         return { ok: compatible, info: bridgeState.info, code: compatible ? undefined : 'RUNNER_PROTOCOL_MISMATCH' };
       }
       setState({ connected: false, state: info.code === 'RUNNER_PROTOCOL_MISMATCH' ? 'PROTOCOL_MISMATCH' : 'DISCONNECTED', lastErrorCode: info.code, lastErrorAt: Date.now(), lastCheckedAt: Date.now() });

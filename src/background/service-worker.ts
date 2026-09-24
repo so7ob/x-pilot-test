@@ -100,10 +100,10 @@ async function runDiagnostics(): Promise<DiagnosticsResult> {
     checks.push({ id: 'permissions', label: 'Permissions', status: hasCore && hasXOrigin ? 'OK' : 'WARN', message: hasCore && hasXOrigin ? 'Permissions: OK' : 'Permissions: WARN', details: `core=${hasCore} x=${hasXOrigin}` });
   } catch (error) { checks.push({ id: 'permissions', label: 'Permissions', status: 'FAIL', message: 'Permissions: FAIL', details: error instanceof Error ? error.message : 'PERMISSIONS_READ_FAILED' }); }
   const automationTabId = state?.session?.automationTabId;
-  if (automationTabId) {
+  if (automationTabId && resolveSessionBackend(state?.session, await getSettings()) !== 'LOCAL_RUNNER') {
     try { await chrome.tabs.get(automationTabId); checks.push({ id: 'automation-tab', label: 'Automation Tab', status: 'OK', message: 'Automation Tab: OK', details: String(automationTabId) }); }
     catch { checks.push({ id: 'automation-tab', label: 'Automation Tab', status: 'WARN', message: 'Automation Tab: WARN', details: 'التبويب المسجل غير موجود' }); }
-  } else checks.push({ id: 'automation-tab', label: 'Automation Tab', status: 'WARN', message: 'Automation Tab: غير موجود', details: 'لا توجد جلسة أتمتة نشطة' });
+  } else checks.push({ id: 'automation-tab', label: 'Automation Tab', status: 'WARN', message: 'Automation Tab: غير موجود', details: resolveSessionBackend(state?.session, await getSettings()) === 'LOCAL_RUNNER' ? 'LOCAL_RUNNER mode: no automation tab' : 'لا توجد جلسة أتمتة نشطة' });
   return result;
 }
 

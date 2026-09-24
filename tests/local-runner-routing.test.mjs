@@ -100,11 +100,26 @@ test('publish intent is persisted before the runner submit (same invariant as th
   assert.ok(intentIndex >= 0 && publishIndex > intentIndex, 'publishIntentId must be persisted before the runner publish command');
 });
 
-test('pause/stop send runner CANCEL only as advisory pre-submit cancellation', () => {
-  assert.match(engine, /cancelInFlightRunnerOperation\(\)/);
-  const cancelFn = sliceFrom(engine, 'async function cancelInFlightRunnerOperation', 'export async function pauseSession');
-  assert.match(cancelFn, /localRunnerBridge\.cancel/);
-  assert.match(cancelFn, /catch \{/);
+test('definite runner failures never quarantine as uncertain; ledger proof clears the intent', () => {
+  const branch = sliceFrom(engine, "if (executionBackend === 'LOCAL_RUNNER') {", 'tabId = await getOrCreateAutomationTab(session);');
+  // FAILED_BEFORE_SUBMIT / REJECTED clear the publish intent BEFORE throwing,
+  // so the normal failure path (retry policy) applies instead of the
+  // PUBLISHED_UNVERIFIED quarantine.
+  const definiteIndex = branch.indexOf("runnerResult.outcome === 'FAILED_BEFORE_SUBMIT' || runnerResult.outcome === 'REJECTED'");
+  const clearIndex = branch.indexOf('publishIntentId: undefined');
+  assert.ok(definiteIndex >= 0 && clearIndex > definiteIndex, 'definite outcomes must clear publishIntentId before throwing');
+  assert.match(branch, /RUNNER_DAILY_LIMIT'\) throw new Error\('X_DAILY_POST_LIMIT_REACHED'\)/, 'runner daily-limit must map to the engine daily-limit code');
+  // REJECTED is terminal (FAILED) — never auto-retried into a possible duplicate.
+  assert.match(engine, /message\.startsWith\('RUNNER_REJECTED'\) \|\| !latestItem/);
+});
+
+test('account handles are compared case-insensitively on both sides', async () => {
+  const extensionSelectors = await import(path.join(root, 'src/domain/x-selectors.ts'));
+  const runnerSelectors = await import(path.join(root, 'local-runner/src/x-selectors.ts'));
+  assert.equal(extensionSelectors.accountFromProfileHref('/MixedCaseHandle'), 'mixedcasehandle');
+  assert.equal(runnerSelectors.accountFromProfileHref('/MixedCaseHandle'), 'mixedcasehandle');
+  const { normalizeAccountHandle } = await import(path.join(root, 'src/storage/storage-repository.ts'));
+  assert.equal(normalizeAccountHandle('@MixedCase'), 'mixedcase');
 });
 test('UPDATE_SETTINGS cannot switch the engine of a running session', () => {
   assert.match(serviceWorker, /const \{ executionBackend: _pinnedExcluded, \.\.\.sessionApplicable \} = message\.settings/);

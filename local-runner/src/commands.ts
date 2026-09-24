@@ -262,10 +262,11 @@ export class CommandDispatcher {
           if (href) {
             const handle = href.match(/^\/(?:i\/)?([A-Za-z0-9_]{1,15})(?:\/|$|\?)/)?.[1];
             if (handle && !['home', 'i', 'explore', 'notifications', 'messages'].includes(handle.toLowerCase())) {
-              if (account === handle) {
+              const normalized = handle.toLowerCase();
+              if (account === normalized) {
                 if (Date.now() - lastAccountSeenAt >= LOGIN_STABLE_MS) break;
               } else {
-                account = handle;
+                account = normalized;
                 lastAccountSeenAt = Date.now();
               }
             } else {
