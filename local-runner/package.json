@@ -1,6 +1,6 @@
 {
   "name": "x-pilot-local-runner",
-  "version": "1.5.1",
+  "version": "1.5.2",
   "private": true,
   "description": "X-Pilot Local Runner — Native Messaging host driving a dedicated headless Chromium via Playwright.",
   "type": "module",

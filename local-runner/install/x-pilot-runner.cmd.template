@@ -1,12 +1,24 @@
-# X-Pilot Local Runner — Windows launcher (rendered by install.ps1).
+# X-Pilot Local Runner - Windows launcher (rendered by install.ps1).
 # Pure ASCII by design: the runner home is resolved at RUNTIME via %~dp0 so
 # install paths with spaces or non-ASCII characters (e.g. Arabic usernames)
 # never appear literally in this file. %~dp0 always expands with the exact
 # bytes of the real filesystem path, quoted where used.
+#
+# stdout is RESERVED for the Native Messaging protocol - never redirect it.
+# stderr (bootstrap crashes such as "Cannot find module", plus runner log
+# lines) is captured to %LOCALAPPDATA%\X-Pilot\Runner\logs\host-stderr.log
+# because Chrome discards the host's stderr; the redirect is skipped when the
+# log directory cannot be created so diagnostics can never break the launch.
 @echo off
 setlocal
 set "RUNNER_HOME=%~dp0"
 set "NODE_EXE=__NODE_EXE__"
 if not exist "%NODE_EXE%" set "NODE_EXE=node"
-"%NODE_EXE%" "%RUNNER_HOME%dist\index.js" %*
+set "HOST_LOG_DIR=%LOCALAPPDATA%\X-Pilot\Runner\logs"
+if not exist "%HOST_LOG_DIR%" mkdir "%HOST_LOG_DIR%" >nul 2>&1
+if exist "%HOST_LOG_DIR%" (
+  "%NODE_EXE%" "%RUNNER_HOME%dist\index.js" %* 2>"%HOST_LOG_DIR%\host-stderr.log"
+) else (
+  "%NODE_EXE%" "%RUNNER_HOME%dist\index.js" %*
+)
 endlocal
