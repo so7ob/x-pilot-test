@@ -1,4 +1,5 @@
 import type { AppState, AutomationSession, ContentInspection, RuntimeStatus } from '../domain/models';
+import type { RunnerInspection, RunnerOperationRecord } from '../runner/protocol';
 import { createHistoricalSession } from '../domain/models';
 import { buildStartOverQueue, countStartOverResets, hasFutureRecoveryAlarm, normalizeRecovery } from '../domain/recovery';
 import { canStartItem, getNextPendingItem, getNextRunnableItem } from '../domain/state-machine';
@@ -6,6 +7,10 @@ import { runPreflight } from '../domain/preflight';
 import { getNextAllowedPublishingTime } from '../domain/scheduling';
 import { decideAlarmFailure } from '../domain/alarm-recovery';
 import { shouldNeverRepublish } from '../domain/data-integrity.ts';
+import { normalizeExecutionBackend, resolveSessionBackend } from '../domain/execution.ts';
+import { decideRunnerReconciliation } from '../domain/runner-reconciliation.ts';
+import { publishContentFromIntentUrl } from '../domain/intent-url.ts';
+import { localRunnerBridge } from '../runner/local-runner-bridge.ts';
 import { getStoredLocale, formatDateTimeForLocale, translateForLocale } from '../i18n/translate.ts';
 import { acquireStartLock, claimAutomationOwner, getAutomationOwner, getMeta, getSettings, getState as getActiveState, getWorkspaceSettings, getWorkspaceState, listWorkspaces, releaseAutomationOwner, releaseStartLock, renewStartLock, saveHistoricalSession, updateHistoricalSession, updateState as updateActiveState, updateWorkspaceState } from '../storage/storage-repository';
 
@@ -23,6 +28,9 @@ import { acquireStartLock, claimAutomationOwner, getAutomationOwner, getMeta, ge
  * - uncertain outcomes become PUBLISHED_UNVERIFIED + PAUSED and never re-publish
  * - tab cleanup happens in finally; injection state is tracked per tab
  * - START holds a renewal lease (acquire/renew/release) and preflight gate
+ * - the execution backend (CHROME_TAB | LOCAL_RUNNER) is pinned per session and
+ *   never falls back implicitly; LOCAL_RUNNER opens NO X tab in the user's
+ *   Chrome (guarded by the runner-mode no-tabs contract tests)
  */
 
 export const ALARM_NAME = 'x-queue-next-item';
@@ -75,15 +83,31 @@ export async function getRuntimeStatus(): Promise<RuntimeStatus> {
   const automationWorkspaceId = await getAutomationOwner();
   const state = await getState();
   const session = state.session;
+  const settings = await getSettings();
+  const runnerSummary = localRunnerBridge.describe();
+  const base: RuntimeStatus = {
+    engineStatus: session?.status ?? 'IDLE',
+    connection: 'NOT_REQUIRED',
+    automationWorkspaceId,
+    checkedAt: Date.now(),
+    executionBackend: normalizeExecutionBackend(settings.executionBackend),
+    sessionExecutionBackend: session?.executionBackend,
+    runner: runnerSummary,
+  };
   const activeEngine = session?.status === 'RUNNING' || session?.status === 'WAITING' || session?.status === 'PAUSED';
+  const pinnedRunnerSession = resolveSessionBackend(session, settings) === 'LOCAL_RUNNER';
+  if (pinnedRunnerSession) {
+    if (!activeEngine) return base;
+    return { ...base, connection: runnerSummary.connected ? 'CONNECTED' : 'DISCONNECTED' };
+  }
   if (!activeEngine || !session?.automationTabId) {
-    return { engineStatus: session?.status ?? 'IDLE', connection: 'NOT_REQUIRED', automationWorkspaceId, checkedAt: Date.now() };
+    return base;
   }
   try {
     await chrome.tabs.get(session.automationTabId);
-    return { engineStatus: session.status, connection: 'CONNECTED', automationTabId: session.automationTabId, automationWorkspaceId, checkedAt: Date.now() };
+    return { ...base, connection: 'CONNECTED', automationTabId: session.automationTabId, automationWorkspaceId };
   } catch {
-    return { engineStatus: session.status, connection: 'DISCONNECTED', automationTabId: session.automationTabId, automationWorkspaceId, checkedAt: Date.now() };
+    return { ...base, connection: 'DISCONNECTED', automationTabId: session.automationTabId, automationWorkspaceId };
   }
 }
 
@@ -123,9 +147,65 @@ export async function updateBadge(state?: AppState): Promise<void> {
   await chrome.action.setBadgeBackgroundColor({ color: snapshot.session?.status === 'FAILED' ? '#b42318' : '#175fbe' });
 }
 
+/**
+ * Runner-ledger reconciliation for interrupted LOCAL_RUNNER operations.
+ *
+ * Runs BEFORE the conservative domain recovery. For every item left in
+ * PUBLISHING with a persisted operationId, the durable runner ledger is
+ * queried (GET_OPERATION). Only ledger-proven states may relax the
+ * conservative defaults:
+ * - CONFIRMED → PUBLISHED (with the recorded post URL as evidence).
+ * - RECEIVED / STARTED / CANCELLED / FAILED_BEFORE_SUBMIT → PENDING (the
+ *   ledger proves the submit click never happened).
+ * - REJECTED → FAILED (X-side refusal recorded).
+ * - SUBMITTED / UNVERIFIED (or an unreachable runner) → left untouched so the
+ *   domain recovery keeps the conservative PUBLISHED_UNVERIFIED path. A
+ *   disconnected channel is NEVER interpreted as proof of publish failure.
+ */
+export async function reconcileInterruptedRunnerOperations(state: AppState): Promise<AppState> {
+  const session = state.session;
+  if (!session?.workspaceId) return state;
+  const settings = await getSettings();
+  const backend = resolveSessionBackend(session, settings);
+  if (backend !== 'LOCAL_RUNNER') return state;
+  const interrupted = state.queue.filter((item) => item.status === 'PUBLISHING' && item.operationId);
+  if (!interrupted.length) return state;
+  const historyAdditions: import('../domain/models').LegacyPublishAttempt[] = [];
+  let nextQueue = state.queue;
+  for (const item of interrupted) {
+    let record: RunnerOperationRecord | null = null;
+    try {
+      record = await localRunnerBridge.getOperation({ workspaceId: session.workspaceId!, profileId: session.workspaceId!, operationId: item.operationId! });
+    } catch {
+      // Runner unreachable or ledger query failed: keep the conservative
+      // PUBLISHING state; normalizeRecovery will quarantine it safely.
+      continue;
+    }
+    if (!record) continue;
+    const now = Date.now();
+    const decision = decideRunnerReconciliation(record);
+    if (decision.action === 'PUBLISHED') {
+      nextQueue = nextQueue.map((candidate) => candidate.id === item.id ? { ...candidate, status: 'PUBLISHED', publishedAt: decision.publishedAt, lastError: undefined, operationId: undefined, publishIntentId: undefined, publishStartedAt: undefined, publishSubmittedAt: undefined, updatedAt: now } : candidate);
+      historyAdditions.push({ id: crypto.randomUUID(), workspaceId: state.workspaceId, sessionId: session.id, queueItemId: item.id, link: item.targetUrl, sourceUrl: item.targetUrl, publishedPostUrl: decision.postUrl, timestamp: now, attemptNumber: item.attempts, action: 'PUBLISH', result: 'PUBLISHED' });
+    } else if (decision.action === 'FAILED') {
+      nextQueue = nextQueue.map((candidate) => candidate.id === item.id ? { ...candidate, status: 'FAILED', lastError: decision.reason, operationId: undefined, publishIntentId: undefined, publishStartedAt: undefined, publishSubmittedAt: undefined, updatedAt: now } : candidate);
+      historyAdditions.push({ id: crypto.randomUUID(), workspaceId: state.workspaceId, sessionId: session.id, queueItemId: item.id, link: item.targetUrl, sourceUrl: item.targetUrl, timestamp: now, attemptNumber: item.attempts, action: 'PUBLISH', result: 'FAILED', error: decision.reason });
+    } else if (decision.action === 'PENDING') {
+      // Ledger proves the irreversible submit step was never reached.
+      nextQueue = nextQueue.map((candidate) => candidate.id === item.id ? { ...candidate, status: 'PENDING', lastError: decision.reason, operationId: undefined, publishIntentId: undefined, publishStartedAt: undefined, publishSubmittedAt: undefined, updatedAt: now } : candidate);
+      historyAdditions.push({ id: crypto.randomUUID(), workspaceId: state.workspaceId, sessionId: session.id, queueItemId: item.id, link: item.targetUrl, sourceUrl: item.targetUrl, timestamp: now, attemptNumber: item.attempts, action: 'INSPECT', result: 'PENDING', error: decision.reason });
+    }
+    // CONSERVATIVE falls through: domain recovery quarantines the item as
+    // PUBLISHED_UNVERIFIED (never automatically republished).
+  }
+  if (nextQueue === state.queue && !historyAdditions.length) return state;
+  return { ...state, queue: nextQueue, history: [...state.history, ...historyAdditions] };
+}
+
 export async function recoverPersistedState(): Promise<AppState> {
   const current = await getState();
-  const recovered = normalizeRecovery(current);
+  const reconciled = await reconcileInterruptedRunnerOperations(current);
+  const recovered = normalizeRecovery(reconciled);
   const changed = JSON.stringify(recovered) !== JSON.stringify(current);
   const state = changed ? await updateRuntimeState(() => recovered) : current;
   await chrome.alarms.clear(ALARM_NAME);
@@ -244,6 +324,46 @@ async function assertOperationActive(itemId: string, operationId: string): Promi
   if (state.session?.status !== 'RUNNING' || item?.operationId !== operationId) throw new Error('AUTOMATION_INTERRUPTED');
 }
 
+/**
+ * Resolves the workspace-scoped runner context used for LOCAL_RUNNER items.
+ * The runner profile is bound 1:1 to the workspace id; the expected account is
+ * the workspace-declared handle and is REQUIRED before any publish attempt.
+ */
+async function runnerContext(state: AppState, session: AutomationSession): Promise<{ workspaceId: string; profileId: string; expectedAccount?: string }> {
+  const workspaceId = state.workspaceId ?? session.workspaceId ?? (await getMeta()).activeWorkspaceId;
+  const workspace = (await listWorkspaces(true)).find((candidate) => candidate.id === workspaceId);
+  return { workspaceId, profileId: workspaceId, expectedAccount: workspace?.expectedAccount };
+}
+
+/**
+ * Persists a VERIFIED successful publish and schedules the next item.
+ * finalStatus is PUBLISHED only — an unverified outcome never reaches this
+ * function; it is routed through the conservative uncertain handler instead.
+ */
+async function settleSuccessfulPublish(session: AutomationSession, item: import('../domain/models').QueueItem, operationId: string, finalStatus: 'PUBLISHED', publishedPostUrl: string | undefined, options: { profile: Awaited<ReturnType<typeof getWorkspaceSettings>>; previousActiveTabId?: number } | { profile?: undefined; previousActiveTabId?: number } = {}): Promise<void> {
+  const profile = options.profile ?? await getWorkspaceSettings(session.workspaceId ?? (await getMeta()).activeWorkspaceId);
+  const finishedAt = Date.now();
+  const nextItem = getNextPendingItem((await getState()).queue, item.id);
+  const nextRunAt = nextItem ? getNextAllowedPublishingTime(finishedAt + profile.intervalMinutes * 60_000, profile.timezone, profile.publishingWindows) : undefined;
+  const nextStatus = nextItem ? 'WAITING' : 'COMPLETED';
+  const nextState = await updateRuntimeState((current) => ({
+    ...current,
+    queue: current.queue.map((candidate) => candidate.id === item.id ? { ...candidate, status: finalStatus, publishedAt: finishedAt, updatedAt: finishedAt, operationId: undefined, publishIntentId: undefined, publishStartedAt: undefined, publishSubmittedAt: undefined } : candidate),
+    session: current.session ? { ...current.session, status: nextStatus, currentItemId: nextItem?.id, currentIndex: nextItem?.position ?? current.session.currentIndex, nextRunAt, completedAt: nextStatus === 'COMPLETED' ? finishedAt : current.session.completedAt, updatedAt: finishedAt } : null,
+    history: [...current.history, { id: crypto.randomUUID(), workspaceId: current.workspaceId, sessionId: session.id, queueItemId: item.id, link: item.targetUrl, sourceUrl: item.targetUrl, publishedPostUrl, timestamp: finishedAt, attemptNumber: item.attempts + 1, action: 'PUBLISH', result: finalStatus }]
+  }));
+  await syncHistoricalSession(nextState, nextStatus === 'COMPLETED' ? 'COMPLETED' : 'WAITING');
+  await chrome.alarms.clear(ALARM_NAME);
+  if (nextRunAt) await chrome.alarms.create(ALARM_NAME, { when: nextRunAt, persistAcrossSessions: true });
+  await restoreActiveTab(options.previousActiveTabId);
+  const visibleState = nextStatus === 'COMPLETED' && nextState.session
+    ? await closeAutomationTabIfConfigured(nextState.session)
+    : nextState;
+  if (nextStatus === 'COMPLETED' && nextState.workspaceId) await releaseAutomationOwner(nextState.workspaceId);
+  if (nextStatus === 'COMPLETED') await notifyEvent('X-Pilot: اكتملت الجلسة', 'اكتملت جميع عناصر Queue.');
+  await broadcast(visibleState);
+}
+
 async function processCurrentItem(): Promise<void> {
   const state = await getState();
   const session = state.session;
@@ -251,6 +371,8 @@ async function processCurrentItem(): Promise<void> {
   const item = state.queue.find((candidate) => candidate.id === session.currentItemId);
   if (!item || shouldNeverRepublish(item) || !canStartItem(item.status)) return;
   const profile = await getWorkspaceSettings(state.workspaceId ?? session.workspaceId ?? (await getMeta()).activeWorkspaceId);
+  const settings = await getSettings();
+  const executionBackend = resolveSessionBackend(session, settings);
   const allowedAt = getNextAllowedPublishingTime(Date.now(), profile.timezone, profile.publishingWindows);
   if (allowedAt && allowedAt > Date.now() + 500) {
     const waiting = await updateRuntimeState((current) => ({ ...current, session: current.session ? { ...current.session, status: 'WAITING', nextRunAt: allowedAt, updatedAt: Date.now() } : null }));
@@ -269,6 +391,39 @@ async function processCurrentItem(): Promise<void> {
   let tabId: number | undefined;
   let previousActiveTabId: number | undefined;
   try {
+    if (executionBackend === 'LOCAL_RUNNER') {
+      // LOCAL_RUNNER path: the X page runs inside the Local Runner's own
+      // headless Chromium. This branch never calls chrome.tabs — no X tab is
+      // opened, activated, or focused in the user's daily Chrome.
+      const context = await runnerContext(state, session);
+      const expectedContent = publishContentFromIntentUrl(item.targetUrl);
+      const inspection: RunnerInspection = await localRunnerBridge.inspect({ workspaceId: context.workspaceId, profileId: context.profileId, targetUrl: item.targetUrl, expectedAccount: context.expectedAccount, expectedContent });
+      if (inspection.pageKind === 'LOGIN') throw new Error('RUNNER_LOGIN_REQUIRED');
+      if (inspection.pageKind === 'CHALLENGE') throw new Error('RUNNER_CHALLENGE');
+      if (inspection.dailyPostLimitReached) throw new Error('X_DAILY_POST_LIMIT_REACHED');
+      if (!inspection.composerFound || !inspection.postButtonFound || !inspection.postButtonEnabled) throw new Error(inspection.reason ?? 'PUBLISH_CONTROLS_NOT_READY');
+      if (context.expectedAccount && inspection.detectedAccount && inspection.detectedAccount !== context.expectedAccount) throw new Error('RUNNER_ACCOUNT_MISMATCH');
+      if (!inspection.detectedAccount) throw new Error('RUNNER_ACCOUNT_UNKNOWN');
+      if (expectedContent !== undefined && !inspection.contentMatches) throw new Error('RUNNER_CONTENT_MISMATCH');
+      await assertOperationActive(item.id, operationId);
+      await updateRuntimeState((current) => ({ ...current, queue: current.queue.map((candidate) => candidate.id === item.id ? { ...candidate, status: 'READY', updatedAt: Date.now() } : candidate) }));
+      const lockedState = await getState();
+      const lockedItem = lockedState.queue.find((candidate) => candidate.id === item.id);
+      if (!lockedItem || lockedItem.operationId !== operationId || lockedItem.status !== 'READY') throw new Error('ITEM_LOCK_LOST');
+      await assertOperationActive(item.id, operationId);
+      await updateRuntimeState((current) => ({ ...current, queue: current.queue.map((candidate) => candidate.id === item.id ? { ...candidate, status: 'PUBLISHING', publishIntentId: operationId, publishStartedAt: Date.now(), updatedAt: Date.now() } : candidate) }));
+      // Idempotent publish: the runner ledger keys on operationId, so a
+      // duplicate request can never trigger a second post click.
+      const runnerResult = await localRunnerBridge.publish({ workspaceId: context.workspaceId, profileId: context.profileId, operationId, targetUrl: item.targetUrl, expectedAccount: context.expectedAccount, expectedContent });
+      await updateRuntimeState((current) => ({ ...current, queue: current.queue.map((candidate) => candidate.id === item.id && candidate.publishIntentId === operationId ? { ...candidate, publishSubmittedAt: Date.now(), updatedAt: Date.now() } : candidate) }));
+      if (runnerResult.outcome === 'FAILED_BEFORE_SUBMIT' || runnerResult.outcome === 'REJECTED') throw new Error(runnerResult.reason ?? 'PUBLISH_FAILED');
+      // CONFIRMED → verified success with attempt-scoped evidence.
+      // UNVERIFIED → routed through the conservative uncertain handler
+      // (PUBLISHED_UNVERIFIED + PAUSED) instead of advancing blindly.
+      if (runnerResult.outcome !== 'CONFIRMED') throw new Error('PUBLISH_OUTCOME_UNVERIFIED');
+      await settleSuccessfulPublish(session, item, operationId, 'PUBLISHED', runnerResult.postUrl, { profile });
+      return;
+    }
     tabId = await getOrCreateAutomationTab(session);
     previousActiveTabId = await getPreviousActiveTabId(tabId);
     await chrome.tabs.update(tabId, { url: item.targetUrl, active: false });
@@ -283,35 +438,27 @@ async function processCurrentItem(): Promise<void> {
     if (!lockedItem || lockedItem.operationId !== operationId || lockedItem.status !== 'READY') throw new Error('ITEM_LOCK_LOST');
     await assertOperationActive(item.id, operationId);
     await updateRuntimeState((current) => ({ ...current, queue: current.queue.map((candidate) => candidate.id === item.id ? { ...candidate, status: 'PUBLISHING', publishIntentId: operationId, publishStartedAt: Date.now(), updatedAt: Date.now() } : candidate) }));
+    // Attempt-scoped evidence: capture the status links visible BEFORE the
+    // submit so that only links that newly appear after this click count as
+    // proof. Composer disappearance alone is never treated as proof.
+    const preEvidence = await chrome.tabs.sendMessage(tabId, { type: 'X_COLLECT_PUBLISH_EVIDENCE' }).catch(() => undefined) as { statusLinks?: string[]; account?: string } | undefined;
+    const preStatusLinks = new Set(preEvidence?.statusLinks ?? []);
     const result = await chrome.tabs.sendMessage(tabId, { type: 'X_PUBLISH' });
     await updateRuntimeState((current) => ({ ...current, queue: current.queue.map((candidate) => candidate.id === item.id && candidate.publishIntentId === operationId ? { ...candidate, publishSubmittedAt: Date.now(), updatedAt: Date.now() } : candidate) }));
     await wait(1800);
     const after = await inspectTab(tabId);
-    const publishedUrlResult = await chrome.tabs.sendMessage(tabId, { type: 'X_GET_PUBLISHED_URL' }).catch(() => undefined) as { publishedPostUrl?: string } | undefined;
-    const publishedPostUrl = publishedUrlResult?.publishedPostUrl;
+    const postEvidence = await chrome.tabs.sendMessage(tabId, { type: 'X_COLLECT_PUBLISH_EVIDENCE' }).catch(() => undefined) as { statusLinks?: string[]; toastVisible?: boolean; account?: string } | undefined;
     if (after.dailyPostLimitReached || after.reason === 'X_DAILY_POST_LIMIT_REACHED') throw new Error('X_DAILY_POST_LIMIT_REACHED');
     if (!result?.ok) throw new Error(result?.reason ?? 'PUBLISH_FAILED');
-    const finalStatus = after.composerFound && after.contentPresent ? 'PUBLISHED_UNVERIFIED' : 'PUBLISHED';
-    const finishedAt = Date.now();
-    const nextItem = getNextPendingItem((await getState()).queue, item.id);
-    const nextRunAt = nextItem ? getNextAllowedPublishingTime(finishedAt + profile.intervalMinutes * 60_000, profile.timezone, profile.publishingWindows) : undefined;
-    const nextStatus = nextItem ? 'WAITING' : 'COMPLETED';
-    const nextState = await updateRuntimeState((current) => ({
-      ...current,
-      queue: current.queue.map((candidate) => candidate.id === item.id ? { ...candidate, status: finalStatus, publishedAt: finishedAt, updatedAt: finishedAt, operationId: undefined, publishIntentId: undefined, publishStartedAt: undefined, publishSubmittedAt: undefined } : candidate),
-      session: current.session ? { ...current.session, status: nextStatus, currentItemId: nextItem?.id, currentIndex: nextItem?.position ?? current.session.currentIndex, nextRunAt, completedAt: nextStatus === 'COMPLETED' ? finishedAt : current.session.completedAt, updatedAt: finishedAt } : null,
-      history: [...current.history, { id: crypto.randomUUID(), workspaceId: current.workspaceId, sessionId: session.id, queueItemId: item.id, link: item.targetUrl, sourceUrl: item.targetUrl, publishedPostUrl, timestamp: finishedAt, attemptNumber: item.attempts + 1, action: 'PUBLISH', result: finalStatus }]
-    }));
-    await syncHistoricalSession(nextState, nextStatus === 'COMPLETED' ? 'COMPLETED' : 'WAITING');
-    await chrome.alarms.clear(ALARM_NAME);
-    if (nextRunAt) await chrome.alarms.create(ALARM_NAME, { when: nextRunAt, persistAcrossSessions: true });
-    await restoreActiveTab(previousActiveTabId);
-    const visibleState = nextStatus === 'COMPLETED' && nextState.session
-      ? await closeAutomationTabIfConfigured(nextState.session)
-      : nextState;
-    if (nextStatus === 'COMPLETED' && nextState.workspaceId) await releaseAutomationOwner(nextState.workspaceId);
-    if (nextStatus === 'COMPLETED') await notifyEvent('X-Pilot: اكتملت الجلسة', 'اكتملت جميع عناصر Queue.');
-    await broadcast(visibleState);
+    const newStatusLink = postEvidence?.statusLinks?.find((link) => !preStatusLinks.has(link));
+    const confirmationToast = postEvidence?.toastVisible === true;
+    if (!newStatusLink && !confirmationToast) {
+      // No attempt-bound evidence: the submit may or may not have landed.
+      // Route through the uncertain handler (PUBLISHED_UNVERIFIED + PAUSED)
+      // instead of guessing success from the composer state.
+      throw new Error('PUBLISH_OUTCOME_UNVERIFIED');
+    }
+    await settleSuccessfulPublish(session, item, operationId, 'PUBLISHED', newStatusLink, { profile, previousActiveTabId });
   } catch (error) {
     const message = error instanceof Error ? error.message : 'UNKNOWN_ERROR';
     if (message === 'X_DAILY_POST_LIMIT_REACHED') {
@@ -413,6 +560,7 @@ export async function performPreflight(workspaceId: string) {
   const workspace = (await listWorkspaces(true)).find((item) => item.id === workspaceId);
   const settings = await getSettings();
   const permissionsGranted = await chrome.permissions.contains({ origins: ['https://x.com/*', 'https://twitter.com/*'] }).catch(() => false);
+  const executionBackend = resolveSessionBackend(state.session, settings);
   let xInspection: ContentInspection | null = null;
   let temporaryTabId: number | undefined;
   let previousActiveTabId: number | undefined;
@@ -421,15 +569,38 @@ export async function performPreflight(workspaceId: string) {
     const targetUrl = firstItem?.targetUrl?.trim() || 'https://x.com/home';
     const parsed = new URL(targetUrl);
     if (!['http:', 'https:'].includes(parsed.protocol) || !/(^|\.)x\.com$|(^|\.)twitter\.com$/i.test(parsed.hostname)) throw new Error('PREFLIGHT_INVALID_X_ITEM_URL');
-    const temporary = await chrome.tabs.create({ url: 'about:blank', active: false });
-    if (!temporary.id) throw new Error('PREFLIGHT_X_TAB_CREATE_FAILED');
-    temporaryTabId = temporary.id;
-    previousActiveTabId = await getPreviousActiveTabId(temporary.id);
-    await chrome.tabs.update(temporary.id, { url: targetUrl, active: false });
-    await waitForTabLoad(temporary.id);
-    await activateAutomationTab(temporary.id);
-    await wait(300);
-    xInspection = await inspectTab(temporary.id);
+    if (executionBackend === 'LOCAL_RUNNER') {
+      // LOCAL_RUNNER preflight inspects through the runner's headless browser;
+      // no X tab is ever opened in the user's daily Chrome.
+      const expectedContent = publishContentFromIntentUrl(targetUrl);
+      const inspection = await localRunnerBridge.inspect({ workspaceId, profileId: workspaceId, targetUrl, expectedAccount: workspace?.expectedAccount, expectedContent });
+      xInspection = {
+        ok: Boolean(inspection.composerFound && inspection.contentPresent && inspection.postButtonFound && inspection.postButtonEnabled && inspection.contentMatches && inspection.detectedAccount && (!workspace?.expectedAccount || inspection.detectedAccount === workspace.expectedAccount)),
+        pageKind: inspection.pageKind,
+        composerFound: inspection.composerFound,
+        contentPresent: inspection.contentPresent,
+        postButtonFound: inspection.postButtonFound,
+        postButtonEnabled: inspection.postButtonEnabled,
+        reason: inspection.dailyPostLimitReached ? 'X_DAILY_POST_LIMIT_REACHED'
+          : inspection.pageKind === 'LOGIN' ? 'NOT_LOGGED_IN'
+          : inspection.pageKind === 'CHALLENGE' ? 'CAPTCHA_OR_SECURITY_CHALLENGE'
+          : workspace?.expectedAccount && inspection.detectedAccount && inspection.detectedAccount !== workspace.expectedAccount ? 'RUNNER_ACCOUNT_MISMATCH'
+          : !inspection.detectedAccount ? 'RUNNER_ACCOUNT_UNKNOWN'
+          : inspection.contentMatches === false && expectedContent !== undefined ? 'RUNNER_CONTENT_MISMATCH'
+          : inspection.reason ?? 'PUBLISH_CONTROLS_NOT_READY',
+        dailyPostLimitReached: inspection.dailyPostLimitReached,
+      };
+    } else {
+      const temporary = await chrome.tabs.create({ url: 'about:blank', active: false });
+      if (!temporary.id) throw new Error('PREFLIGHT_X_TAB_CREATE_FAILED');
+      temporaryTabId = temporary.id;
+      previousActiveTabId = await getPreviousActiveTabId(temporary.id);
+      await chrome.tabs.update(temporary.id, { url: targetUrl, active: false });
+      await waitForTabLoad(temporary.id);
+      await activateAutomationTab(temporary.id);
+      await wait(300);
+      xInspection = await inspectTab(temporary.id);
+    }
   } catch (error) {
     xInspection = { ok: false, pageKind: 'ERROR', composerFound: false, contentPresent: false, postButtonFound: false, postButtonEnabled: false, reason: error instanceof Error ? error.message : 'PREFLIGHT_X_INSPECTION_FAILED' };
   } finally {
@@ -453,6 +624,7 @@ export async function scheduleSession(workspaceId: string, startAt: number): Pro
       }),
       ...settings,
       workspaceId,
+      executionBackend: normalizeExecutionBackend(settings.executionBackend),
       status: 'SCHEDULED',
       scheduledStartAt: startAt,
       nextRunAt: startAt,
@@ -560,7 +732,7 @@ export async function startSession(messageWorkspaceId?: string): Promise<unknown
         id: crypto.randomUUID(), workspaceId, bankUrl: '', ...settings,
         status: 'RUNNING' as const, currentIndex: firstItem?.position ?? 0, total: current.queue.length, version: 1, updatedAt: Date.now(),
       };
-      return { ...current, session: { ...session, ...settings, workspaceId, status: 'RUNNING', startedAt: session.startedAt ?? Date.now(), currentItemId: currentItem, currentIndex: current.queue.find((item) => item.id === currentItem)?.position ?? session.currentIndex, total: current.queue.length, updatedAt: Date.now() } };
+      return { ...current, session: { ...session, ...settings, workspaceId, executionBackend: normalizeExecutionBackend(settings.executionBackend), status: 'RUNNING', startedAt: session.startedAt ?? Date.now(), currentItemId: currentItem, currentIndex: current.queue.find((item) => item.id === currentItem)?.position ?? session.currentIndex, total: current.queue.length, updatedAt: Date.now() } };
     });
     if (state.workspaceId && state.session && !state.session.historicalSessionId) {
       const historical = createHistoricalSession(state.session, state.queue);
@@ -576,7 +748,31 @@ export async function startSession(messageWorkspaceId?: string): Promise<unknown
 
 }
 
+/**
+ * Best-effort cancellation of an in-flight LOCAL_RUNNER operation.
+ * Cancellation is effective only BEFORE the submit click; once the submit may
+ * have reached X the outcome is settled by the runner ledger (recorded result
+ * or PUBLISHED_UNVERIFIED) — stop/pause never claims a possibly-sent post was
+ * cancelled, and never returns the item to PENDING after a possible submit.
+ */
+async function cancelInFlightRunnerOperation(): Promise<void> {
+  try {
+    const state = await getState();
+    const session = state.session;
+    if (!session?.workspaceId) return;
+    const settings = await getSettings();
+    if (resolveSessionBackend(session, settings) !== 'LOCAL_RUNNER') return;
+    const inFlight = state.queue.find((item) => item.id === session.currentItemId && item.status === 'PUBLISHING' && item.operationId && item.publishIntentId);
+    if (!inFlight?.operationId) return;
+    await localRunnerBridge.cancel({ workspaceId: session.workspaceId, profileId: session.workspaceId, operationId: inFlight.operationId });
+  } catch {
+    // Cancellation is advisory: the durable ledger + conservative recovery
+    // own the final decision when the runner cannot be reached.
+  }
+}
+
 export async function pauseSession(): Promise<AppState> {
+  await cancelInFlightRunnerOperation();
   await chrome.alarms.clear(ALARM_NAME);
   const paused = await updateRuntimeState((state) => ({
     ...state,
@@ -611,6 +807,7 @@ export async function resumeSession(): Promise<AppState> {
 }
 
 export async function stopSession(): Promise<AppState> {
+  await cancelInFlightRunnerOperation();
   await chrome.alarms.clear(ALARM_NAME);
   await chrome.alarms.clear(SCHEDULE_ALARM_NAME);
   const stopped = await updateRuntimeState((state) => ({

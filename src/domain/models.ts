@@ -3,6 +3,8 @@ export type SessionStatus = 'IDLE' | 'SCHEDULED' | 'RUNNING' | 'PAUSED' | 'STOPP
 export type FailureBehavior = 'CONTINUE' | 'PAUSE';
 export type DuplicatePolicy = 'BLOCK' | 'WARN' | 'ALLOW';
 export type HistoricalSessionStatus = 'SCHEDULED' | 'RUNNING' | 'PAUSED' | 'WAITING' | 'COMPLETED' | 'STOPPED' | 'FAILED';
+/** Execution backend pinned per session: the current Chrome tab flow or the X-Pilot Local Runner native host. */
+export type ExecutionBackend = 'CHROME_TAB' | 'LOCAL_RUNNER';
 
 export interface QueueItem {
   id: string; workspaceId?: string; sourceBankId?: string; sourceBankUrl: string; targetUrl: string; label?: string; position: number;
@@ -14,6 +16,7 @@ export interface AutomationSession {
   startedAt?: number; scheduledStartAt?: number; pausedAt?: number; completedAt?: number; nextRunAt?: number; automationTabId?: number; timezone?: string;
   intervalMinutes: number; maxRetries: number; failureBehavior: FailureBehavior; confirmBeforeStart: boolean; alarmFailureCount?: number; lastAlarmError?: string;
   keepAutomationTabOpen: boolean; closeTabOnComplete: boolean; version: number; updatedAt: number; historicalSessionId?: string;
+  executionBackend?: ExecutionBackend;
 }
 export interface LegacyPublishAttempt {
   id: string; workspaceId?: string; sessionId?: string; queueItemId: string; link: string; sourceUrl?: string; publishedPostUrl?: string; timestamp: number;
@@ -25,26 +28,28 @@ export interface HistoricalSession {
   intervalMinutes: number; maxRetries: number; failureBehavior: FailureBehavior; createdAt: number; updatedAt: number; failureReason?: string;
 }
 export interface AppState { workspaceId?: string; queue: QueueItem[]; session: AutomationSession | null; history: LegacyPublishAttempt[]; }
-export interface Workspace { id: string; name: string; description: string; color?: string; icon?: string; favorite: boolean; archived: boolean; automationProfile?: Partial<import('./scheduling').WorkspaceAutomationProfile>; createdAt: number; updatedAt: number; lastActivityAt: number; }
+export interface Workspace { id: string; name: string; description: string; color?: string; icon?: string; favorite: boolean; archived: boolean; automationProfile?: Partial<import('./scheduling').WorkspaceAutomationProfile>; createdAt: number; updatedAt: number; lastActivityAt: number; /** Expected X account handle (without @) bound to this Workspace's Local Runner profile. */ expectedAccount?: string; }
 export interface TweetBank { id: string; workspaceId: string; name: string; description?: string; url: string; favorite: boolean; archived: boolean; createdAt: number; updatedAt: number; lastExtractedAt?: number; lastExtractedCount?: number; lastSnapshot?: BankSnapshotItem[]; lastSnapshotAt?: number; }
 export interface BankSnapshotItem { url: string; label?: string; contentFingerprint?: string; normalizedContent?: string; }
 export type BankDiffCategory = 'NEW' | 'EXISTING' | 'PREVIOUSLY_PUBLISHED' | 'REMOVED' | 'INVALID';
 export interface BankDiffItem extends BankSnapshotItem { id: string; category: BankDiffCategory; existingQueueItemId?: string; duplicateStatus?: 'UNIQUE' | 'DUPLICATE' | 'PUBLISHED_DUPLICATE'; duplicateOfWorkspaceId?: string; reason?: string; }
 export interface BankDiffResult { workspaceId: string; bankId: string; refreshedAt: number; items: BankDiffItem[]; selectedNewIds: string[]; }
 export interface WorkspaceState extends AppState { workspaceId: string; workspace: Workspace; banks: TweetBank[]; historicalSessions: HistoricalSession[]; }
-export interface Settings { intervalMinutes: number; maxRetries: number; failureBehavior: FailureBehavior; confirmBeforeStart: boolean; keepAutomationTabOpen: boolean; closeTabOnComplete: boolean; duplicatePolicy: DuplicatePolicy; publishingWindows: import('./scheduling').PublishingWindow[]; timezone: string; notificationsEnabled: boolean; badgeMode: import('./scheduling').BadgeMode; }
+export interface Settings { intervalMinutes: number; maxRetries: number; failureBehavior: FailureBehavior; confirmBeforeStart: boolean; keepAutomationTabOpen: boolean; closeTabOnComplete: boolean; duplicatePolicy: DuplicatePolicy; publishingWindows: import('./scheduling').PublishingWindow[]; timezone: string; notificationsEnabled: boolean; badgeMode: import('./scheduling').BadgeMode; /** Selected execution backend for future sessions. Optional for backward compatibility with stored v4 settings. */ executionBackend?: ExecutionBackend; }
 export interface AppMetaState { schemaVersion: 2 | 3 | 4; activeWorkspaceId: string; automationWorkspaceId?: string; workspaceOrder: string[]; globalSettings: Settings; appVersion?: string; createdAt?: number; updatedAt?: number; }
 export interface AppMetadata { schemaVersion: 4; appVersion: string; activeWorkspaceId: string; automationWorkspaceId?: string; workspaceOrder: string[]; createdAt: number; updatedAt: number; }
 export interface GlobalSettings extends Settings { updatedAt: number; }
 export interface WorkspaceSettings { workspaceId: string; overrides: Partial<Omit<Settings, 'updatedAt'>>; createdAt: number; updatedAt: number; }
-export interface AutomationSessionRuntime { workspaceId: string; sessionId: string; bankId?: string; bankUrl?: string; status: SessionStatus; currentItemId?: string; currentIndex: number; total: number; startedAt?: number; scheduledStartAt?: number; pausedAt?: number; completedAt?: number; nextRunAt?: number; automationTabId?: number; alarmName?: string; operationId?: string; alarmFailureCount?: number; lastAlarmError?: string; updatedAt: number; version: number; }
+export interface AutomationSessionRuntime { workspaceId: string; sessionId: string; bankId?: string; bankUrl?: string; status: SessionStatus; currentItemId?: string; currentIndex: number; total: number; startedAt?: number; scheduledStartAt?: number; pausedAt?: number; completedAt?: number; nextRunAt?: number; automationTabId?: number; alarmName?: string; operationId?: string; alarmFailureCount?: number; lastAlarmError?: string; updatedAt: number; version: number; executionBackend?: ExecutionBackend; }
 export interface AutomationSessionRecord extends HistoricalSession { scheduledStartAt?: number; timezone: string; }
 export interface BankSnapshot { id: string; bankId: string; workspaceId: string; capturedAt: number; items: BankSnapshotItem[]; }
 export interface PublishAttempt extends Omit<LegacyPublishAttempt, 'link' | 'action' | 'result' | 'error'> { targetUrl?: string; link?: string; sourceUrl?: string; publishedPostUrl?: string; action: string; result: string; error?: string; errorCode?: string; errorMessage?: string; durationMs?: number; adapter?: string; }
 export interface LegacyPublishAttempt { id: string; workspaceId?: string; sessionId?: string; queueItemId: string; link: string; sourceUrl?: string; publishedPostUrl?: string; timestamp: number; attemptNumber: number; action: string; result: string; error?: string; }
-export const defaultSettings: Settings = { intervalMinutes: 2, maxRetries: 2, failureBehavior: 'CONTINUE', confirmBeforeStart: true, keepAutomationTabOpen: true, closeTabOnComplete: false, duplicatePolicy: 'BLOCK', publishingWindows: [], timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', notificationsEnabled: true, badgeMode: 'COUNT' };
+export const defaultSettings: Settings = { intervalMinutes: 2, maxRetries: 2, failureBehavior: 'CONTINUE', confirmBeforeStart: true, keepAutomationTabOpen: true, closeTabOnComplete: false, duplicatePolicy: 'BLOCK', publishingWindows: [], timezone: Intl.DateTimeFormat().resolvedOptions().timeZone || 'UTC', notificationsEnabled: true, badgeMode: 'COUNT', executionBackend: 'CHROME_TAB' };
 export type AutomationConnection = 'CONNECTED' | 'DISCONNECTED' | 'NOT_REQUIRED';
-export interface RuntimeStatus { engineStatus: SessionStatus; connection: AutomationConnection; automationTabId?: number; automationWorkspaceId?: string; checkedAt: number; }
+export type RunnerConnectionState = 'NOT_INSTALLED' | 'LAUNCH_FAILED' | 'PROTOCOL_MISMATCH' | 'DISCONNECTED' | 'CONNECTED' | 'UNKNOWN';
+export interface RunnerStatusSummary { state: RunnerConnectionState; connected: boolean; runnerVersion?: string; protocolVersion?: number; protocolCompatible?: boolean; detectedAccount?: string; activeProfileId?: string; lastErrorCode?: string; lastErrorAt?: number; lastCheckedAt?: number; }
+export interface RuntimeStatus { engineStatus: SessionStatus; connection: AutomationConnection; automationTabId?: number; automationWorkspaceId?: string; checkedAt: number; executionBackend?: ExecutionBackend; sessionExecutionBackend?: ExecutionBackend; runner?: RunnerStatusSummary; }
 export interface PreflightResult { ready: boolean; checkedAt: number; workspaceId: string; summaryKey: string; summaryParams: Record<string, string | number>; checks: Array<{ id: string; status: 'PASS' | 'WARN' | 'FAIL'; messageKey: string; detailsKey?: string; params?: Record<string, string | number>; blocking: boolean }>; counts: { total: number; ready: number; published: number; failed: number; skipped: number; duplicates: number; publishedDuplicates: number; invalid: number }; }
 export type DryRunItemStatus = 'READY' | 'LOGIN_REQUIRED' | 'CONTENT_MISSING' | 'POST_BUTTON_NOT_FOUND' | 'INVALID_URL' | 'CHALLENGE_DETECTED' | 'ERROR';
 export type DryRunMode = 'FIRST_ITEM' | 'ENTIRE_QUEUE';
@@ -64,7 +69,7 @@ export interface StartOverResult extends AppState { resetCount: number; }
 export type RuntimeMessage =
   | { type: 'GET_STATE' } | { type: 'GET_WORKSPACES' } | { type: 'GET_WORKSPACE_STATE'; workspaceId?: string } | { type: 'GET_SESSION_HISTORY'; workspaceId?: string } | { type: 'PREFLIGHT_CHECK'; workspaceId?: string } | { type: 'RUN_DIAGNOSTICS' }
   | { type: 'CREATE_WORKSPACE'; name: string; description?: string; color?: string; icon?: string } | { type: 'UPDATE_WORKSPACE_PROFILE'; workspaceId: string; profile: Partial<Settings> } | { type: 'CLEAR_WORKSPACE_PROFILE'; workspaceId: string }
-  | { type: 'UPDATE_WORKSPACE'; workspaceId: string; patch: Partial<Pick<Workspace, 'name' | 'description' | 'color' | 'icon' | 'favorite'>> }
+  | { type: 'UPDATE_WORKSPACE'; workspaceId: string; patch: Partial<Pick<Workspace, 'name' | 'description' | 'color' | 'icon' | 'favorite' | 'expectedAccount'>> }
   | { type: 'ARCHIVE_WORKSPACE'; workspaceId: string } | { type: 'RESTORE_WORKSPACE'; workspaceId: string } | { type: 'DELETE_WORKSPACE'; workspaceId: string; confirmed: boolean }
   | { type: 'SET_ACTIVE_WORKSPACE'; workspaceId: string } | { type: 'GET_RUNTIME_STATUS' } | { type: 'GET_BANKS'; workspaceId?: string }
   | { type: 'CREATE_BANK'; workspaceId?: string; name: string; url: string; description?: string } | { type: 'UPDATE_BANK'; workspaceId?: string; bankId: string; patch: Partial<Pick<TweetBank, 'name' | 'description' | 'url' | 'favorite'>> }
@@ -73,7 +78,8 @@ export type RuntimeMessage =
   | { type: 'EXPORT_BANKS'; workspaceId?: string; bankIds: string[] } | { type: 'IMPORT_BANKS'; workspaceId?: string; payload: unknown }
   | { type: 'START'; confirmed?: boolean; workspaceId?: string } | { type: 'RECOVERY_START_OVER' } | { type: 'SCHEDULE'; startAt: number; workspaceId?: string } | { type: 'RESCHEDULE'; startAt: number; workspaceId?: string } | { type: 'CANCEL_SCHEDULE'; workspaceId?: string } | { type: 'PAUSE'; workspaceId?: string } | { type: 'RESUME'; workspaceId?: string } | { type: 'STOP'; workspaceId?: string } | { type: 'DRY_RUN_FIRST'; workspaceId?: string } | { type: 'DRY_RUN_QUEUE'; workspaceId?: string } | { type: 'DRY_RUN_STOP' } | { type: 'GET_DRY_RUN' }
   | { type: 'EXPORT_BACKUP' } | { type: 'VALIDATE_BACKUP'; backup: unknown } | { type: 'RESTORE_BACKUP'; backup: unknown; confirmed: boolean }
-  | { type: 'SKIP_CURRENT' } | { type: 'RETRY_ITEM'; itemId: string } | { type: 'REORDER'; itemId: string; direction: 'up' | 'down' } | { type: 'DELETE_ITEM'; itemId: string } | { type: 'CLEAR_COMPLETED' } | { type: 'BULK_ACTION'; action: BulkQueueAction; itemIds: string[]; workspaceId?: string; bankId?: string; confirmed?: boolean } | { type: 'UPDATE_SETTINGS'; settings: Settings; workspaceId?: string };
+  | { type: 'SKIP_CURRENT' } | { type: 'RETRY_ITEM'; itemId: string } | { type: 'REORDER'; itemId: string; direction: 'up' | 'down' } | { type: 'DELETE_ITEM'; itemId: string } | { type: 'CLEAR_COMPLETED' } | { type: 'BULK_ACTION'; action: BulkQueueAction; itemIds: string[]; workspaceId?: string; bankId?: string; confirmed?: boolean } | { type: 'UPDATE_SETTINGS'; settings: Settings; workspaceId?: string }
+  | { type: 'RUNNER_TEST'; workspaceId?: string } | { type: 'RUNNER_SETUP_LOGIN'; workspaceId?: string } | { type: 'RUNNER_CANCEL_LOGIN'; workspaceId?: string } | { type: 'RUNNER_RECONCILE'; workspaceId?: string };
 export type ContentMessage = { type: 'X_INSPECT' } | { type: 'X_PUBLISH' } | { type: 'X_GET_PUBLISHED_URL' };
 export interface ContentInspection { ok: boolean; pageKind: 'X' | 'LOGIN' | 'CHALLENGE' | 'ERROR' | 'UNKNOWN'; composerFound: boolean; contentPresent: boolean; postButtonFound: boolean; postButtonEnabled: boolean; reason?: string; dailyPostLimitReached?: boolean; }
 

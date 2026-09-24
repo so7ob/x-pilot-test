@@ -1,4 +1,4 @@
-import type { AppMetaState, AppMetadata, AppState, AutomationSession, AutomationSessionRecord, AutomationSessionRuntime, BackupEnvelope, BackupSummary, BackupValidation, GlobalSettings, HistoricalSession, LegacyPublishAttempt, PublishAttempt, QueueItem, Settings, TweetBank, Workspace, WorkspaceSettings, WorkspaceState } from '../domain/models';
+import type { AppMetaState, AppMetadata, AppState, AutomationSession, AutomationSessionRecord, AutomationSessionRuntime, BackupEnvelope, BackupSummary, BackupValidation, ExecutionBackend, GlobalSettings, HistoricalSession, LegacyPublishAttempt, PublishAttempt, QueueItem, Settings, TweetBank, Workspace, WorkspaceSettings, WorkspaceState } from '../domain/models';
 import { CURRENT_SCHEMA_VERSION, getMigrationPath, validateMigrationRegistry } from './migrations.ts';
 import { timedStorageOperation } from './storage-performance.ts';
 import { normalizeWorkspaceState } from '../domain/data-integrity.ts';
@@ -38,12 +38,12 @@ const v4AttemptsKey = (workspaceId: string) => `${V4_ATTEMPTS_PREFIX}${workspace
 
 function runtimeFromSession(session: AutomationSession | null, workspaceId: string): AutomationSessionRuntime | null {
   if (!session) return null;
-  return { workspaceId, sessionId: session.id, bankId: session.bankId, bankUrl: session.bankUrl, status: session.status, currentItemId: session.currentItemId, currentIndex: session.currentIndex, total: session.total, startedAt: session.startedAt, scheduledStartAt: session.scheduledStartAt, pausedAt: session.pausedAt, completedAt: session.completedAt, nextRunAt: session.nextRunAt, automationTabId: session.automationTabId, operationId: undefined, alarmFailureCount: session.alarmFailureCount, lastAlarmError: session.lastAlarmError, updatedAt: session.updatedAt, version: session.version };
+  return { workspaceId, sessionId: session.id, bankId: session.bankId, bankUrl: session.bankUrl, status: session.status, currentItemId: session.currentItemId, currentIndex: session.currentIndex, total: session.total, startedAt: session.startedAt, scheduledStartAt: session.scheduledStartAt, pausedAt: session.pausedAt, completedAt: session.completedAt, nextRunAt: session.nextRunAt, automationTabId: session.automationTabId, executionBackend: session.executionBackend, operationId: undefined, alarmFailureCount: session.alarmFailureCount, lastAlarmError: session.lastAlarmError, updatedAt: session.updatedAt, version: session.version };
 }
 
 function sessionFromRuntime(runtime: AutomationSessionRuntime | null, settings: Settings): AutomationSession | null {
   if (!runtime) return null;
-  return { id: runtime.sessionId, workspaceId: runtime.workspaceId, bankId: runtime.bankId, bankUrl: runtime.bankUrl ?? '', status: runtime.status, currentItemId: runtime.currentItemId, currentIndex: runtime.currentIndex, total: runtime.total, startedAt: runtime.startedAt, scheduledStartAt: runtime.scheduledStartAt, pausedAt: runtime.pausedAt, completedAt: runtime.completedAt, nextRunAt: runtime.nextRunAt, automationTabId: runtime.automationTabId, alarmFailureCount: runtime.alarmFailureCount, lastAlarmError: runtime.lastAlarmError, intervalMinutes: settings.intervalMinutes, maxRetries: settings.maxRetries, failureBehavior: settings.failureBehavior, confirmBeforeStart: settings.confirmBeforeStart, keepAutomationTabOpen: settings.keepAutomationTabOpen, closeTabOnComplete: settings.closeTabOnComplete, version: runtime.version, updatedAt: runtime.updatedAt, historicalSessionId: runtime.sessionId };
+  return { id: runtime.sessionId, workspaceId: runtime.workspaceId, bankId: runtime.bankId, bankUrl: runtime.bankUrl ?? '', status: runtime.status, currentItemId: runtime.currentItemId, currentIndex: runtime.currentIndex, total: runtime.total, startedAt: runtime.startedAt, scheduledStartAt: runtime.scheduledStartAt, pausedAt: runtime.pausedAt, completedAt: runtime.completedAt, nextRunAt: runtime.nextRunAt, automationTabId: runtime.automationTabId, executionBackend: runtime.executionBackend, alarmFailureCount: runtime.alarmFailureCount, lastAlarmError: runtime.lastAlarmError, intervalMinutes: settings.intervalMinutes, maxRetries: settings.maxRetries, failureBehavior: settings.failureBehavior, confirmBeforeStart: settings.confirmBeforeStart, keepAutomationTabOpen: settings.keepAutomationTabOpen, closeTabOnComplete: settings.closeTabOnComplete, version: runtime.version, updatedAt: runtime.updatedAt, historicalSessionId: runtime.sessionId };
 }
 
 function toV4Attempt(attempt: LegacyPublishAttempt, workspaceId: string): PublishAttempt {
@@ -226,11 +226,20 @@ export async function createWorkspace(name: string, description = '', color?: st
   return state;
 }
 
-export async function updateWorkspace(workspaceId: string, patch: Partial<Pick<Workspace, 'name' | 'description' | 'color' | 'icon' | 'favorite'>>): Promise<Workspace> {
+export async function updateWorkspace(workspaceId: string, patch: Partial<Pick<Workspace, 'name' | 'description' | 'color' | 'icon' | 'favorite' | 'expectedAccount'>>): Promise<Workspace> {
   const state = await getWorkspaceState(workspaceId);
-  const workspace = { ...state.workspace, ...patch, updatedAt: Date.now(), lastActivityAt: Date.now() };
+  const normalizedPatch = patch.expectedAccount !== undefined ? { ...patch, expectedAccount: normalizeAccountHandle(patch.expectedAccount) } : patch;
+  const workspace = { ...state.workspace, ...normalizedPatch, updatedAt: Date.now(), lastActivityAt: Date.now() };
   await saveWorkspaceState({ ...state, workspace });
   return workspace;
+}
+
+/** Normalizes a user-entered X handle (strips leading @, lowercases, trims). */
+export function normalizeAccountHandle(value: string | undefined): string | undefined {
+  const trimmed = (value ?? '').trim().replace(/^@+/, '');
+  if (!trimmed) return undefined;
+  if (!/^[A-Za-z0-9_]{1,15}$/.test(trimmed)) throw new Error('WORKSPACE_EXPECTED_ACCOUNT_INVALID');
+  return trimmed.toLowerCase();
 }
 
 export async function setActiveWorkspace(workspaceId: string): Promise<AppMetaState> {
