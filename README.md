@@ -1,5 +1,7 @@
 # X-Pilot
 
+> **v1.5.2:** أُصلح خطأ Chrome «Error when communicating with the native messaging host.» على Windows: كان `install.ps1` يكتب manifest المضيف بـ `Set-Content -Encoding UTF8` الذي **يضيف BOM دائمًا على PowerShell 5.1**، وChrome يرفض ملفات manifest ذات BOM فيفشل كل `connectNative` قبل تشغيل المضيف أصلًا (المشكلة رقم 6). أصبح الملف يُكتب بترميز UTF-8 بدون BOM مع تحقق ذاتي للبايتات وحقول JSON، وتسجيل Registry عبر واجهة .NET مع قراءة مرتدة، والتقاط أخطاء إقلاع المضيف في `host-stderr.log`، وأداة تشخيص جديدة `install\doctor.ps1` تفحص السلسلة كاملة وتنفّذ PING مُأطرًا حقيقيًا عبر نفس ما يشغّله Chrome دون فتح المتصفح. لا تغيير في بروتوكول المضيف أو سلوك النشر.
+
 > **v1.5.1:** أُصلح انهيار مثبّت Local Runner على Windows PowerShell 5.1 (`$PSScriptRoot` كان فارغًا داخل قيم `param()` الافتراضية) — الحل الآن في جسم السكربت مع عقد معماري يمنع عودة النمط. لا تغيير في سلوك النشر أو التخزين.
 
 > **v1.5.0:** أُضيف **X-Pilot Local Runner**: محرك تنفيذ محلي (Native Messaging + Node + Playwright) يشغّل النشر والفحوص في متصفح Chromium مستقل بوضع Headless دون فتح أي تبويب X في Chrome المعتاد، مع تثبيت المحرك لكل جلسة، دفتر عمليات دائم يمنع النشر المكرر، تحقق نشر مرتبط بالمحاولة، وربط الحساب المتوقع لكل مساحة عمل. راجع [معمارية Local Runner](docs/local-runner-architecture.md) و[تثبيت Windows](docs/local-runner-install-windows.md).
@@ -134,7 +136,7 @@ npm run build
 - نتيجة النشر تستعمل مؤشرًا محافظًا (`PUBLISHED_UNVERIFIED`) عندما لا يتوفر دليل مرتبط بالمحاولة (استجابة CreateTweet أو رابط جديد بعد الضغط).
 - واجهة Refresh Bank وExport/Import وRecovery الكامل بعد كل سيناريو Restart ستكتمل في المراحل التالية.
 - لا تبدأ جلسة غير مكتملة تلقائيًا بعد إعادة التشغيل دون إضافة مسار Resume صريح في الواجهة.
-- مثبّت Local Runner على Windows: شُغّل فعليًا على جهاز Windows حقيقي في v1.5.0 فانهار على PowerShell 5.1 (قبل أي كتابة) وأُصلح في v1.5.1 — شغّل `install.ps1` ثم «اختبار الاتصال» للتحقق. كذلك لم يُجرَ أي نشر على حساب حقيقي.
+- مثبّت Local Runner على Windows: شُغّل فعليًا على جهاز Windows حقيقي — انهار v1.5.0 على PowerShell 5.1 (أُصلح في v1.5.1)، ثم فشل «اختبار الاتصال» بخطأ Chrome العام (أُصلح في v1.5.2: manifest بلا BOM + doctor.ps1 للتشخيص الذاتي). شغّل `install\doctor.ps1` ثم «اختبار الاتصال» للتحقق. كذلك لم يُجرَ أي نشر على حساب حقيقي.
 - استمرار الجدولة مرتبط بتشغيل Chrome (الإضافة تملك الجدولة؛ Runner ليس خدمة خلفية مستقلة).
 
 ## البنية
@@ -157,7 +159,7 @@ src/
 └── ui/main.tsx
 local-runner/                    ← حزمة X-Pilot Local Runner المستقلة (Node + Playwright)
 ├── src/ (index, protocol, commands, ledger, browser, x-flow, x-selectors, profile-store, logging)
-├── install/ (install.ps1, uninstall.ps1, repair.ps1, host manifest, launcher)
+├── install/ (install.ps1, uninstall.ps1, repair.ps1, doctor.ps1, host manifest, launcher)
 └── tests/ (protocol, ledger, locks, idempotency, live-Chromium integration, host e2e)
 ```
 

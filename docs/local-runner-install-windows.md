@@ -89,14 +89,33 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -PurgeData
 | `%LOCALAPPDATA%\X-Pilot\Runner\profiles\<workspaceId>` | Playwright user-data dirs (login sessions). Never inside the repo; never in extension backups. |
 | `%LOCALAPPDATA%\X-Pilot\Runner\ledger\operations.json` | Durable duplicate-publish ledger. |
 | `%LOCALAPPDATA%\X-Pilot\Runner\logs\runner.log` | Rotating runner logs (2 MB × 3). |
+| `%LOCALAPPDATA%\X-Pilot\Runner\logs\host-stderr.log` | stderr of the LAST host launch (bootstrap crashes such as `Cannot find module`; overwritten per launch, v1.5.2+). |
+
+## Diagnosing with doctor.ps1 (v1.5.2+)
+
+Run the bundled diagnostic any time, without opening Chrome:
+
+```powershell
+powershell -ExecutionPolicy Bypass -File .\local-runner\install\doctor.ps1
+```
+
+It checks Node.js, the runner files, the HKCU registration, the manifest bytes
+(including a BOM check), and then performs a **live framed PING** against the
+real launch chain - once directly with `node dist\index.js` and once through
+`cmd.exe /c x-pilot-runner.cmd`, the exact command Chrome runs. If both
+pass, the launch chain is healthy and any remaining failure is on the Chrome
+side (stale registration -> fully restart Chrome via `chrome://restart`).
 
 ## Troubleshooting (distinct states, not a generic error)
 
 | UI state / code | Meaning | Action |
 |---|---|---|
+| Chrome: `Error when communicating with the native messaging host.` | The host was found but failed to launch. In v1.5.0/v1.5.1 on Windows PowerShell 5.1 the manifest was written **with a UTF-8 BOM**, which Chrome's JSON reader rejects (issue #6) | **Fixed in v1.5.2.** Without re-downloading you can repair it in place, then FULLY restart Chrome (`chrome://restart`): `[IO.File]::WriteAllText($p, [IO.File]::ReadAllText($p), (New-Object Text.UTF8Encoding($false)))` with `$p = "$env:LOCALAPPDATA\X-Pilot\NativeMessagingHosts\com.so7ob.x_pilot_runner.json"`. If it still fails, run `install\doctor.ps1` and check `logs\host-stderr.log`. |
+| Chrome: `Specified native messaging host not found.` | Registry key or manifest file missing | Run install.ps1 with the correct extension id. |
+| Chrome: `Access to the specified native messaging host is forbidden.` | The installed extension id is not in `allowed_origins` | Re-run install.ps1 (or repair.ps1) with the id shown on chrome://extensions. |
 | Installer: `Split-Path: Cannot bind argument ... empty string` | v1.5.0 bug: `$PSScriptRoot` was read inside a `param()` default (empty on Windows PowerShell 5.1) | Fixed in v1.5.1. With the v1.5.0 zip you can also pass `-RunnerHome <path to local-runner>` explicitly. |
 | Not installed (`RUNNER_NOT_INSTALLED`) | Host manifest missing | Run install.ps1 with the correct extension id. |
-| Failed to start (`RUNNER_LAUNCH_FAILED`) | Host registered but the process fails | Check `logs\runner.log`; verify Node ≥ 20. |
+| Failed to start (`RUNNER_LAUNCH_FAILED`) | Host registered but the process fails | Run `install\doctor.ps1`; check `logs\runner.log` and `logs\host-stderr.log`; verify Node >= 20. |
 | Protocol mismatch (`RUNNER_PROTOCOL_MISMATCH`) | Extension/runner versions disagree | Update the runner (`repair.ps1`) and reload the extension. |
 | Login expired (`RUNNER_LOGIN_REQUIRED`) | Runner profile session invalid | Press Set up login again. |
 | Profile in use (`RUNNER_PROFILE_LOCKED`) | Another process/session owns the profile | Close the other session (or login window) and retry. |
@@ -104,12 +123,14 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -PurgeData
 
 ## Limitations (explicit)
 
-- The installer has now been executed on a real Windows machine (v1.5.0): it
-  crashed at startup under Windows PowerShell 5.1 before taking any action;
-  the root cause (`$PSScriptRoot` empty inside `param()` defaults on 5.1) was
-  fixed in **v1.5.1** and guarded by architecture-contract tests. Re-run
-  `install.ps1` on Windows and press **Test connection** to confirm the full
-  path end-to-end.
+- The installer chain has now been exercised on a real Windows machine twice:
+  v1.5.0 crashed at startup under Windows PowerShell 5.1 (fixed in v1.5.1,
+  issue #3), and v1.5.1 completed the install but Chrome failed every
+  `connectNative` with the generic communication error because the manifest
+  carried a UTF-8 BOM (fixed in v1.5.2, issue #6, with byte-level
+  self-verification and doctor.ps1). Re-run `install.ps1`, then
+  `install\doctor.ps1`, then **Test connection** to confirm the full path
+  end-to-end.
 - No live publish against x.com was performed during development.
 - X UI changes can break selectors; the runner shares the adapter's selector
   rules so fixes apply to both engines together.
