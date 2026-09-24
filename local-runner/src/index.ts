@@ -15,7 +15,7 @@
 import os from 'node:os';
 import fs from 'node:fs';
 import path from 'node:path';
-import { encodeFrame, FrameDecoder, RUNNER_PROTOCOL_VERSION, isValidRunnerRequest, type RunnerResponse } from './protocol.ts';
+import { encodeFrame, FrameDecoder, RUNNER_PROTOCOL_VERSION, isValidRunnerRequest, type RunnerRequest, type RunnerResponse } from './protocol.ts';
 import { OperationLedger } from './ledger.ts';
 import { BrowserManager } from './browser.ts';
 import { XFlow } from './x-flow.ts';
@@ -40,6 +40,37 @@ function extraHostsFromEnv(): string[] {
   return (process.env.XPILOT_EXTRA_HOSTS ?? '').split(',').map((host) => host.trim().toLowerCase()).filter(Boolean);
 }
 
+/**
+ * Observability (issue #9): Chrome launches native hosts with the caller origin
+ * as the first argument (chrome-extension://<id>/). Logging it - together with
+ * the raw argv and the stdio fd kinds - makes every runner.log session
+ * self-explanatory: a session launched by Chrome shows the extension origin,
+ * while doctor.ps1 / manual runs show none.
+ */
+function callerOriginFromArgv(argv: string[]): string | null {
+  for (const arg of argv.slice(2)) {
+    if (arg.startsWith('chrome-extension://')) return arg;
+  }
+  return null;
+}
+
+function fdKind(fd: number): string {
+  try {
+    const stats = fs.fstatSync(fd);
+    // Node exposes piped fds as FIFOs on Windows and as socketpairs on
+    // POSIX spawn(); both are the IPC channels native messaging runs over.
+    if (stats.isFIFO() || stats.isSocket()) return 'pipe';
+    if (stats.isCharacterDevice()) return 'character';
+    if (stats.isFile()) return 'file';
+    return 'other';
+  } catch {
+    return 'unavailable';
+  }
+}
+
+let framesReceived = 0;
+let responsesSent = 0;
+
 // stdout belongs to the protocol: force every console.* stream to stderr.
 const originalConsoleLog = console.log;
 console.log = (...args: unknown[]) => process.stderr.write(`${args.map(String).join(' ')}\n`);
@@ -63,8 +94,10 @@ function writeResponse(response: RunnerResponse): Promise<void> {
         const ok = process.stdout.write(payload, (error) => (error ? reject(error) : resolve()));
         if (ok) resolve();
       });
+      responsesSent += 1;
+      logger.info('response sent', { requestId: response.requestId, type: response.type, status: response.status, code: response.code, bytes: payload.byteLength });
     } catch (error) {
-      logger.error('failed to write protocol response', { message: String(error) });
+      logger.error('failed to write protocol response', { requestId: response.requestId, message: String(error) });
     }
   };
   stdoutQueue = stdoutQueue.then(run, run);
@@ -87,6 +120,7 @@ async function handlePayload(payload: string): Promise<void> {
   try {
     parsed = JSON.parse(payload);
   } catch {
+    logger.warn('request payload is not valid JSON', { bytes: payload.length });
     await writeResponse({ protocolVersion: RUNNER_PROTOCOL_VERSION, requestId: `invalid-${Date.now()}`, type: 'RESULT', status: 'ERROR', code: 'RUNNER_INVALID_REQUEST', message: 'payload is not valid JSON', at: Date.now() });
     return;
   }
@@ -94,6 +128,8 @@ async function handlePayload(payload: string): Promise<void> {
     await writeResponse({ protocolVersion: RUNNER_PROTOCOL_VERSION, requestId: `invalid-${Date.now()}`, type: 'RESULT', status: 'ERROR', code: 'RUNNER_INVALID_REQUEST', message: 'request failed schema validation', at: Date.now() });
     return;
   }
+  const request = parsed as RunnerRequest;
+  logger.info('request received', { command: request.command, requestId: request.requestId });
   try {
     const response = await dispatcher.dispatch(parsed);
     await writeResponse(response);
@@ -106,7 +142,7 @@ let shuttingDown = false;
 async function shutdown(reason: string): Promise<void> {
   if (shuttingDown) return;
   shuttingDown = true;
-  logger.info('runner shutting down', { reason });
+  logger.info('runner shutting down', { reason, framesReceived, responsesSent });
   try {
     await dispatcher.dispatch({ protocolVersion: RUNNER_PROTOCOL_VERSION, requestId: `shutdown-${Date.now()}`, command: 'CLEANUP', workspaceId: 'x-pilot-internal', profileId: 'x-pilot-internal', issuedAt: Date.now() });
   } catch { /* best effort */ }
@@ -124,6 +160,7 @@ process.stdin.on('data', (chunk: Buffer) => {
     void writeResponse({ protocolVersion: RUNNER_PROTOCOL_VERSION, requestId: `frame-${Date.now()}`, type: 'RESULT', status: 'ERROR', code: 'RUNNER_INVALID_REQUEST', message: 'frame exceeded size limits', at: Date.now() });
     return;
   }
+  framesReceived += payloads.length;
   for (const payload of payloads) void handlePayload(payload);
 });
 
@@ -144,6 +181,12 @@ void (async () => {
     endianness: os.endianness(),
     baseUrl: baseUrlFromEnv(),
     extraHosts: extraHostsFromEnv(),
+  });
+  logger.info('host process context', {
+    callerOrigin: callerOriginFromArgv(process.argv),
+    stdin: fdKind(0),
+    stdout: fdKind(1),
+    argv: process.argv,
   });
   await ledger.load();
   const pruned = await ledger.prune();

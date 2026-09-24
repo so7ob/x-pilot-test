@@ -6,6 +6,13 @@
   - Verifies prerequisites (Node.js >= 20).
   - Installs runner dependencies and builds dist/index.js.
   - Optionally downloads the Playwright Chromium browser (use -SkipBrowserDownload to skip).
+  - Compiles x-pilot-runner.exe from install\x-pilot-runner.cs using the .NET
+    Framework csc.exe that ships with every Windows 10/11 (issue #9): when the
+    host manifest registers an .exe, Chrome launches it through its robust
+    direct-launch path (real inherited pipe handles) instead of the legacy
+    cmd.exe "< pipe > pipe" redirection chain that fails with "Error when
+    communicating with the native messaging host." on real machines. When
+    csc.exe is unavailable the installer falls back to the .cmd launcher.
   - Renders x-pilot-runner.cmd (ASCII-only; resolves its own path at runtime, so
     install paths containing spaces or Arabic characters are safe). The launcher
     captures host stderr into %LOCALAPPDATA%\X-Pilot\Runner\logs\host-stderr.log
@@ -112,7 +119,64 @@ $nodeCommand = (Get-Command node -ErrorAction Stop).Source
 $nodeAscii = $nodeCommand -match '^[\x00-\x7F]+$'
 $rendered = $template.Replace('__NODE_EXE__', $(if ($nodeAscii) { $nodeCommand } else { 'node' }))
 Set-Content -Path $launcherPath -Value $rendered -Encoding Ascii
-Write-Ok "Launcher: $launcherPath"
+Write-Ok "Fallback launcher: $launcherPath"
+
+# Compile the REAL launcher Chrome should run. Chrome's direct-launch path
+# (launch_context_win.cc, crbug 41084583) is used only when the manifest path
+# ends with .exe; every other extension goes through the fragile cmd.exe pipe
+# redirection chain (issue #9). The .NET Framework csc.exe ships with every
+# Windows 10/11, so this needs no extra toolchain on the user machine.
+Write-Step 'Compiling the native host launcher (x-pilot-runner.exe)...'
+$launcherCs = Join-Path $PSScriptRoot 'x-pilot-runner.cs'
+$launcherExePath = Join-Path $runnerHome 'x-pilot-runner.exe'
+$nodeSidecarPath = Join-Path $runnerHome 'x-pilot-runner.node.txt'
+$csc = $null
+$cscCandidates = @(
+  (Join-Path $env:WINDIR 'Microsoft.NET\Framework64\v4.0.30319\csc.exe'),
+  (Join-Path $env:WINDIR 'Microsoft.NET\Framework\v4.0.30319\csc.exe')
+)
+foreach ($candidate in $cscCandidates) { if ((Test-Path $candidate) -and (-not $csc)) { $csc = $candidate } }
+if (-not $csc) { $cscCommand = Get-Command csc.exe -ErrorAction SilentlyContinue; if ($cscCommand) { $csc = $cscCommand.Source } }
+$manifestLauncherPath = $launcherPath
+if ($csc) {
+  & $csc /nologo /target:exe /platform:anycpu /optimize+ /out:"$launcherExePath" "$launcherCs"
+  if ($LASTEXITCODE -eq 0 -and (Test-Path $launcherExePath)) {
+    # Self-test the exact binary Chrome will launch: it must start and answer
+    # with the marker line (also prints how node will be resolved). Guarded so
+    # a blocked launch (e.g. antivirus) falls back to the .cmd instead of
+    # aborting the whole install.
+    $selftestOutput = ''
+    $selftestOk = $false
+    try {
+      $selftestOutput = (& $launcherExePath --xpilot-launcher-selftest) | Out-String
+      if ($LASTEXITCODE -eq 0 -and $selftestOutput -match 'X-PILOT-LAUNCHER-SELFTEST-OK') { $selftestOk = $true }
+    } catch {
+      $selftestOk = $false
+    }
+    if ($selftestOk) {
+      $manifestLauncherPath = $launcherExePath
+      # Sidecar node path (ASCII only) so the exe resolves node robustly.
+      if ($nodeAscii) {
+        [System.IO.File]::WriteAllText($nodeSidecarPath, $nodeCommand + [Environment]::NewLine, (New-Object System.Text.ASCIIEncoding))
+        Write-Ok "Compiled launcher: $launcherExePath (self-test passed; node sidecar written)."
+      } else {
+        if (Test-Path $nodeSidecarPath) { Remove-Item -Path $nodeSidecarPath -Force }
+        Write-Ok "Compiled launcher: $launcherExePath (self-test passed; node resolved via well-known locations/PATH - node path is non-ASCII)."
+      }
+    } else {
+      Write-Host '  The compiled launcher failed its self-test; registering the .cmd fallback (legacy Chrome launch path).' -ForegroundColor Yellow
+    }
+  } else {
+    Write-Host '  csc.exe could not compile x-pilot-runner.exe; registering the .cmd fallback (legacy Chrome launch path).' -ForegroundColor Yellow
+  }
+} else {
+  Write-Host '  .NET Framework csc.exe was not found; registering the .cmd fallback (legacy Chrome launch path).' -ForegroundColor Yellow
+}
+if ($manifestLauncherPath -eq $launcherExePath) {
+  Write-Ok 'Manifest will register the .exe launcher: Chrome uses the direct-launch path with inherited pipe handles.'
+} else {
+  Write-Host '  Manifest will register the .cmd launcher: Chrome will use the legacy cmd.exe pipe redirection chain.' -ForegroundColor Yellow
+}
 
 Write-Step 'Registering the native messaging host (per-user, HKCU)...'
 New-Item -ItemType Directory -Path $manifestsDir -Force | Out-Null
@@ -120,7 +184,7 @@ $allowedOrigin = "chrome-extension://$ExtensionId/"
 $manifest = [ordered]@{
   name        = $hostName
   description = 'X-Pilot Local Runner - drives a dedicated headless Chromium to execute X-Pilot publishing operations.'
-  path        = $launcherPath
+  path        = $manifestLauncherPath
   type        = 'stdio'
   allowed_origins = @($allowedOrigin)
 }
@@ -145,7 +209,7 @@ if ($rawBytes.Length -ge 3 -and $rawBytes[0] -eq 0xEF -and $rawBytes[1] -eq 0xBB
 $roundTrip = ([System.IO.File]::ReadAllText($manifestPath, $utf8NoBom) | ConvertFrom-Json)
 if ($roundTrip.name -ne $hostName) { Write-Fail "Manifest self-check failed: name is '$($roundTrip.name)' (expected '$hostName')." }
 if ($roundTrip.type -ne 'stdio') { Write-Fail "Manifest self-check failed: type is '$($roundTrip.type)' (expected 'stdio')." }
-if ($roundTrip.path -ne $launcherPath) { Write-Fail 'Manifest self-check failed: path does not match the rendered launcher.' }
+if ($roundTrip.path -ne $manifestLauncherPath) { Write-Fail 'Manifest self-check failed: path does not match the registered launcher.' }
 if (-not (Test-Path $roundTrip.path)) { Write-Fail "Manifest self-check failed: host launcher not found at '$($roundTrip.path)'." }
 if ($roundTrip.allowed_origins -notcontains $allowedOrigin) { Write-Fail 'Manifest self-check failed: allowed_origins is missing the extension origin.' }
 Write-Ok 'Manifest verified: UTF-8 without BOM, valid JSON, required fields, launcher present.'

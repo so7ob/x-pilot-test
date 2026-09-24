@@ -52,6 +52,12 @@ else { Write-Ok 'Manifest was not present.' }
 $launcher = Join-Path $RunnerHome 'x-pilot-runner.cmd'
 if (Test-Path $launcher) { Remove-Item -Path $launcher -Force; Write-Ok 'Rendered launcher removed.' }
 
+$launcherExe = Join-Path $RunnerHome 'x-pilot-runner.exe'
+if (Test-Path $launcherExe) { Remove-Item -Path $launcherExe -Force; Write-Ok 'Compiled launcher (x-pilot-runner.exe) removed.' }
+
+$nodeSidecar = Join-Path $RunnerHome 'x-pilot-runner.node.txt'
+if (Test-Path $nodeSidecar) { Remove-Item -Path $nodeSidecar -Force; Write-Ok 'Node path sidecar removed.' }
+
 if ($PurgeData) {
   Write-Step 'Purging login profiles and the operation ledger (explicit -PurgeData)...'
   if (Test-Path $dataDir) { Remove-Item -Path $dataDir -Recurse -Force; Write-Ok "Data removed: $dataDir" }

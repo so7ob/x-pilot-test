@@ -44,8 +44,17 @@ export function LocalRunnerCard({ settings, onSettingsChange, runtimeStatus, act
     if (result?.ok) {
       setRunnerTested({ ok: true, message: t('runner.connected') });
       onNotice(t('runner.connected'));
+    } else if (result?.code) {
+      // Localized code message plus the raw Chrome disconnect text (English,
+      // diagnostic value): issue #9 made the bridge map Chrome's generic
+      // errors to distinct codes while keeping the original message.
+      const localized = getUserFacingMessage(result.code);
+      const rawDetail = result.message && result.message !== result.code ? ` · ${result.message}` : '';
+      const message = `${localized}${rawDetail}`;
+      setRunnerTested({ ok: false, message });
+      onNotice(message);
     } else {
-      const message = result?.code ? getUserFacingMessage(result.code) : (result?.message ?? t('errors.unknown'));
+      const message = getUserFacingMessage(result?.message ?? t('errors.unknown'));
       setRunnerTested({ ok: false, message });
       onNotice(message);
     }

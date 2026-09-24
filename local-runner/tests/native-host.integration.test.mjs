@@ -122,3 +122,65 @@ test('native host round-trip: PING/GET_INFO/INSPECT/PUBLISH with idempotent dupl
     fs.rmSync(dataDir, { recursive: true, force: true });
   }
 });
+
+test('chrome-style launch: origin argv, single PING, stdin closes - response must be delivered before exit and the log must be conclusive (issue #9)', { skip: !hasBuild }, async () => {
+  // This is the EXACT lifecycle the user's machine showed: Chrome launches the
+  // host with the caller origin as an argument, one PING is written, and stdin
+  // closes again shortly after. The host must (1) still deliver the RESULT
+  // frame before exiting (the shutdown path flushes stdoutQueue), and (2)
+  // leave a runner.log that proves who launched it, whether a message was
+  // received, and how the session ended.
+  const dataDir = fs.mkdtempSync(path.join(os.tmpdir(), 'x-pilot-chrome-style-'));
+  const origin = 'chrome-extension://geppjelfpfleebmfgaiciiholmdliipn/';
+  const child = spawn(process.execPath, [runnerEntry, origin, '--parent-window=0'], {
+    env: { ...process.env, XPILOT_DATA_DIR: dataDir, XPILOT_LOG_LEVEL: 'info' },
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  const decoder = new FrameDecoder();
+  const frames = [];
+  const stdoutDone = new Promise((resolve) => child.stdout.on('end', resolve));
+  child.stdout.on('data', (chunk) => {
+    for (const payload of decoder.push(new Uint8Array(chunk.buffer, chunk.byteOffset, chunk.byteLength))) {
+      try { frames.push(JSON.parse(payload)); } catch { /* stdout purity */ }
+    }
+  });
+  child.stderr.on('data', () => { /* stderr only: stdout must stay pure */ });
+
+  const request = { protocolVersion: RUNNER_PROTOCOL_VERSION, requestId: 'chrome-style-ping', command: 'PING', workspaceId: 'ws', profileId: 'ws', issuedAt: Date.now() };
+  child.stdin.write(Buffer.from(encodeFrame(JSON.stringify(request))));
+  // Close stdin immediately after the single message - the hostile case.
+  child.stdin.end();
+
+  const [exitCode] = await Promise.all([new Promise((resolve) => child.on('exit', (code) => resolve(code))), stdoutDone]);
+
+  // 1. The RESULT frame was delivered BEFORE the host exited.
+  assert.equal(exitCode, 0, 'the host must exit cleanly after stdin closes');
+  const pingResult = frames.find((frame) => frame.requestId === 'chrome-style-ping');
+  assert.ok(pingResult, 'the PING RESULT frame must be flushed to stdout before exit');
+  assert.equal(pingResult.status, 'OK');
+  assert.equal(pingResult.code, 'RUNNER_OK');
+  assert.equal(pingResult.result.pong, true);
+  // stdout purity held: every decoded frame was a protocol response.
+  assert.ok(frames.every((frame) => frame.type === 'RESULT' || frame.type === 'ACK' || frame.type === 'EVENT'));
+
+  // 2. The runner.log is conclusive: caller origin, request, response, counters.
+  const logPath = path.join(dataDir, 'logs', 'runner.log');
+  const log = fs.existsSync(logPath) ? fs.readFileSync(logPath, 'utf8') : '';
+  const contextLine = log.split('\n').find((line) => line.includes('host process context'));
+  assert.ok(contextLine, "runner.log must contain the 'host process context' line");
+  const context = JSON.parse(contextLine);
+  assert.equal(context.detail.callerOrigin, origin, 'the logged caller origin must be the Chrome extension origin');
+  assert.equal(context.detail.stdin, 'pipe');
+  assert.equal(context.detail.stdout, 'pipe');
+  assert.ok(log.includes('"message":"request received"') && log.includes('"command":"PING"') && log.includes('chrome-style-ping'), 'the PING receipt must be logged');
+  assert.ok(log.includes('"message":"response sent"') && log.includes('RUNNER_OK'), 'the response write must be logged');
+  const shutdownLine = log.split('\n').find((line) => line.includes('runner shutting down'));
+  assert.ok(shutdownLine, 'the shutdown must be logged');
+  const shutdown = JSON.parse(shutdownLine);
+  assert.equal(shutdown.detail.reason, 'stdin-closed');
+  assert.ok(shutdown.detail.framesReceived >= 1, 'framesReceived must prove that a message was actually delivered');
+  assert.ok(shutdown.detail.responsesSent >= 1, 'responsesSent must prove that the response was actually written');
+
+  fs.rmSync(dataDir, { recursive: true, force: true });
+});

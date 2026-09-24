@@ -142,3 +142,59 @@ test('all installer scripts stay pure ASCII (PS 5.1 reads BOM-less scripts as AN
     assert.ok(bytes.every((b) => b <= 0x7f), `${name}: must stay pure ASCII`);
   }
 });
+
+test('install.ps1 compiles x-pilot-runner.exe with the .NET Framework csc.exe and self-tests it (issue #9)', () => {
+  // Chrome launches native hosts through two code paths
+  // (launch_context_win.cc): .exe manifests use the robust direct-launch path
+  // with inherited pipe handles; everything else (.cmd/.bat) goes through the
+  // fragile "cmd.exe /d /s /c ... < pipe > pipe" redirection chain that fails
+  // with "Error when communicating with the native messaging host." on real
+  // machines. The installer must therefore compile and REGISTER an .exe.
+  const source = readScript('install.ps1');
+  assert.match(source, /x-pilot-runner\.cs/, 'install.ps1: must compile the C# launcher source');
+  assert.match(source, /Microsoft\.NET\\Framework64\\v4\.0\.30319\\csc\.exe/, 'install.ps1: must prefer the .NET Framework64 csc.exe that ships with Windows');
+  assert.match(source, /Microsoft\.NET\\Framework\\v4\.0\.30319\\csc\.exe/, 'install.ps1: must fall back to the 32-bit Framework csc.exe');
+  assert.match(source, /\/target:exe \/platform:anycpu/, 'install.ps1: must compile a console exe (stays start_hidden under Chrome)');
+  assert.match(source, /--xpilot-launcher-selftest/, 'install.ps1: must self-test the compiled exe before registering it');
+  assert.match(source, /X-PILOT-LAUNCHER-SELFTEST-OK/, 'install.ps1: must verify the self-test marker line');
+  assert.match(source, /x-pilot-runner\.node\.txt/, 'install.ps1: must write the node sidecar path for the exe');
+  assert.match(source, /\$manifestLauncherPath = \$launcherExePath/, 'install.ps1: the manifest must register the .exe when compilation succeeds');
+  assert.match(source, /\$manifestLauncherPath = \$launcherPath/, 'install.ps1: must keep the .cmd fallback when csc.exe is unavailable');
+  assert.match(source, /path\s*=\s*\$manifestLauncherPath/, 'install.ps1: the manifest path must come from the launcher selection');
+});
+
+test('x-pilot-runner.cs is a C# 5 ASCII launcher that never redirects stdin/stdout (issue #9)', () => {
+  const csPath = path.join(installDir, 'x-pilot-runner.cs');
+  assert.ok(fs.existsSync(csPath), 'x-pilot-runner.cs must exist next to the installer');
+  const source = fs.readFileSync(csPath, 'utf8');
+  // stdout/stdin ARE the native messaging pipes Chrome opened: they must pass
+  // through to node untouched. Only stderr may be redirected.
+  assert.match(source, /RedirectStandardInput = false/, 'launcher: stdin must pass through (protocol pipe)');
+  assert.match(source, /RedirectStandardOutput = false/, 'launcher: stdout must pass through (protocol pipe)');
+  assert.match(source, /RedirectStandardError = true/, 'launcher: stderr must be captured (Chrome gives direct-launched hosts no usable stderr)');
+  assert.match(source, /UseShellExecute = false/, 'launcher: must use raw CreateProcess (no shell)');
+  assert.match(source, /--xpilot-launcher-selftest/, 'launcher: must support the install-time self-test argument');
+  // The .NET Framework csc.exe only supports C# 5: newer syntax would silently
+  // break compilation on user machines. Comments are stripped first so the
+  // header text that documents the forbidden syntax does not match itself.
+  const codeOnly = source.split('\n').filter((line) => !line.trim().startsWith('//')).join('\n');
+  assert.doesNotMatch(codeOnly, /\$"/, 'launcher: no C# 6+ string interpolation (Framework csc is C# 5)');
+  assert.doesNotMatch(codeOnly, /\?\./, 'launcher: no C# 6 null-conditional operators');
+  assert.doesNotMatch(codeOnly, /nameof\(/, 'launcher: no C# 6 nameof');
+  assert.ok(Buffer.from(source, 'utf8').every((b) => b <= 0x7f), 'launcher: must stay pure ASCII (csc reads BOM-less sources as ANSI)');
+});
+
+test('uninstall.ps1 removes the compiled launcher and its node sidecar', () => {
+  const source = readScript('uninstall.ps1');
+  assert.match(source, /x-pilot-runner\.exe/, 'uninstall.ps1: must remove the compiled launcher');
+  assert.match(source, /x-pilot-runner\.node\.txt/, 'uninstall.ps1: must remove the node sidecar');
+});
+
+test('doctor.ps1 probes the .exe with Chrome-style origin arguments (issue #9)', () => {
+  const source = readScript('doctor.ps1');
+  assert.match(source, /'exe'/, 'doctor.ps1: the live test must support the exe launch mode');
+  assert.match(source, /--parent-window=0/, 'doctor.ps1: must reproduce the argument Chrome appends to native hosts');
+  assert.match(source, /chrome-extension:\/\//, 'doctor.ps1: the exe probe must pass the caller origin like Chrome does');
+  assert.match(source, /-like '\*\.cmd'/, 'doctor.ps1: must warn when the registered launcher is still a batch file');
+  assert.match(source, /framesReceived/, 'doctor.ps1: must explain the new stdin-close counters in the log tail hint');
+});
