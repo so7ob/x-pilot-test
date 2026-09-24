@@ -66,7 +66,12 @@ export function LocalRunnerCard({ settings, onSettingsChange, runtimeStatus, act
     try {
       const result = await sendRuntime({ type: 'RUNNER_SETUP_LOGIN', workspaceId: activeWorkspace?.id }) as { error?: string } | undefined;
       if (result?.error) { onNotice(getUserFacingMessage(result.error)); return; }
-      onNotice(t('runner.loginWindowOpened'));
+      // The engine is PINNED per session and never switched implicitly (see
+      // domain/execution.ts). When login setup succeeds while the engine is
+      // still CHROME_TAB, point the user to the execution-engine select —
+      // otherwise preflight/dry-run/publishing keep using the browser-tab
+      // engine and never touch the profile they just logged into (issue #15).
+      onNotice((settings.executionBackend ?? 'CHROME_TAB') !== 'LOCAL_RUNNER' ? t('runner.engineSwitchHint') : t('runner.loginWindowOpened'));
     } finally {
       setLoginSetupBusy(false);
     }
