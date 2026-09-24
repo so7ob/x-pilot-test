@@ -6,7 +6,11 @@ import { fingerprintTweet } from '../domain/content-fingerprint';
 import { isTerminalItem } from '../domain/state-machine';
 import { extractLinksFromValues } from '../extraction/bank-parser';
 import { applyBulkStatus, reorderSelected } from '../domain/bulk-queue';
-import { activateAutomationTab, broadcast, cancelScheduledStart, commitQueueMutation, getOrCreateAutomationTab, getPreviousActiveTabId, getState, getRuntimeStatus, inspectTab, pauseSession, performPreflight, recoverPersistedState, restoreActiveTab, resumeSession, scheduleSession, startOverSession, startSession, stopSession, updateRuntimeState, wait, waitForTabLoad, ALARM_NAME, SCHEDULE_ALARM_NAME } from './automation-engine';
+import { activateAutomationTab, broadcast, cancelScheduledStart, commitQueueMutation, getOrCreateAutomationTab, getPreviousActiveTabId, getState, getRuntimeStatus, inspectTab, pauseSession, performPreflight, recoverPersistedState, reconcileInterruptedRunnerOperations, restoreActiveTab, resumeSession, scheduleSession, startOverSession, startSession, stopSession, updateRuntimeState, wait, waitForTabLoad, ALARM_NAME, SCHEDULE_ALARM_NAME } from './automation-engine';
+import { resolveSessionBackend } from '../domain/execution.ts';
+import { publishContentFromIntentUrl } from '../domain/intent-url.ts';
+import { localRunnerBridge } from '../runner/local-runner-bridge.ts';
+import type { RunnerInspection } from '../runner/protocol';
 import { addAttempt, archiveBank, cleanupRestoreStaging, clearWorkspaceProfile, createBank, createWorkspace, deleteBank, deleteWorkspace, exportBackup, getHistoricalSessions, getMeta, getSettings, getState as getActiveState, getWorkspaceState, importBanks, listBanks, listWorkspaces, releaseAutomationOwner, restoreBackup, restoreBank, saveSettings, setActiveWorkspace, updateBank, updateWorkspace, updateWorkspaceProfile, updateWorkspaceState, archiveWorkspace, restoreWorkspace, validateBackup } from '../storage/storage-repository';
 
 const bankDiffs = new Map<string, BankDiffResult>();
@@ -41,24 +45,49 @@ async function runDiagnostics(): Promise<DiagnosticsResult> {
   } catch (error) { checks.push({ id: 'alarm', label: 'Alarm', status: 'FAIL', message: 'Alarm: FAIL', details: error instanceof Error ? error.message : 'ALARM_READ_FAILED' }); }
   let temporaryTabId: number | undefined;
   try {
-    let tabId = state?.session?.automationTabId;
-    if (tabId) { try { await chrome.tabs.get(tabId); } catch { tabId = undefined; } }
-    if (!tabId) {
-      const xTabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'] });
-      tabId = xTabs[0]?.id;
+    const executionBackend = resolveSessionBackend(state?.session, await getSettings());
+    if (executionBackend === 'LOCAL_RUNNER') {
+      // LOCAL_RUNNER diagnostics run through the runner's headless browser;
+      // the user's daily Chrome never opens an X tab.
+      const runnerStatus = localRunnerBridge.describe();
+      const workspaceId = state?.workspaceId ?? (await getMeta()).activeWorkspaceId;
+      const workspace = (await listWorkspaces(true)).find((item) => item.id === workspaceId);
+      checks.push({ id: 'runner-connection', label: 'Local Runner', status: runnerStatus.connected ? 'OK' : runnerStatus.state === 'NOT_INSTALLED' ? 'FAIL' : 'WARN', message: runnerStatus.connected ? 'Local Runner: OK' : `Local Runner: ${runnerStatus.state}`, details: runnerStatus.lastErrorCode ?? runnerStatus.runnerVersion ?? '' });
+      let inspected: RunnerInspection | null = null;
+      try {
+        const firstItem = state?.queue.find((item) => item.status === 'PENDING' || item.status === 'FAILED');
+        const targetUrl = firstItem?.targetUrl?.trim() || 'https://x.com/home';
+        inspected = await localRunnerBridge.inspect({ workspaceId, profileId: workspaceId, targetUrl, expectedAccount: workspace?.expectedAccount, expectedContent: publishContentFromIntentUrl(targetUrl) });
+      } catch (error) {
+        checks.push({ id: 'x-session', label: 'X Login', status: 'NOT_CHECKED', message: 'X Login: NOT_CHECKED', details: error instanceof Error ? error.message : 'RUNNER_INSPECTION_FAILED' });
+      }
+      if (inspected) {
+        checks.push({ id: 'x-session', label: 'X Login', status: inspected.pageKind === 'X' ? 'OK' : inspected.pageKind === 'LOGIN' ? 'FAIL' : 'WARN', message: inspected.pageKind === 'X' ? 'X Session: OK' : `X Session: ${inspected.pageKind}`, details: inspected.detectedAccount ?? inspected.reason });
+        checks.push({ id: 'adapter', label: 'Adapter status', status: inspected.composerFound ? 'OK' : 'WARN', message: inspected.composerFound ? 'Adapter status: OK' : 'Adapter status: WARN', details: inspected.reason });
+        checks.push({ id: 'composer', label: 'Composer detection', status: inspected.composerFound ? 'OK' : 'WARN', message: inspected.composerFound ? 'Composer detection: OK' : 'Composer detection: WARN' });
+        checks.push({ id: 'post-button', label: 'Post Button detection', status: inspected.postButtonFound && inspected.postButtonEnabled ? 'OK' : 'WARN', message: inspected.postButtonFound && inspected.postButtonEnabled ? 'Post Button detection: OK' : 'Post Button detection: WARN' });
+        checks.push({ id: 'runner-account', label: 'Runner Account', status: !workspace?.expectedAccount || inspected.detectedAccount === workspace.expectedAccount ? 'OK' : 'FAIL', message: workspace?.expectedAccount ? `Runner Account: ${inspected.detectedAccount ?? 'unknown'}` : 'Runner Account: not configured', details: `expected=${workspace?.expectedAccount ?? '-'}` });
+      }
+    } else {
+      let tabId = state?.session?.automationTabId;
+      if (tabId) { try { await chrome.tabs.get(tabId); } catch { tabId = undefined; } }
+      if (!tabId) {
+        const xTabs = await chrome.tabs.query({ url: ['https://x.com/*', 'https://twitter.com/*'] });
+        tabId = xTabs[0]?.id;
+      }
+      if (!tabId) {
+        const temporary = await chrome.tabs.create({ url: 'https://x.com/home', active: false });
+        if (!temporary.id) throw new Error('DIAGNOSTICS_TAB_CREATE_FAILED');
+        temporaryTabId = temporary.id; tabId = temporary.id;
+        await waitForTabLoad(tabId);
+      }
+      result.automationTabId = state?.session?.automationTabId;
+      const inspected = await inspectTab(tabId);
+      checks.push({ id: 'x-session', label: 'X Login', status: inspected.pageKind === 'X' ? 'OK' : inspected.pageKind === 'LOGIN' ? 'FAIL' : 'WARN', message: inspected.pageKind === 'X' ? 'X Session: OK' : `X Session: ${inspected.pageKind}`, details: inspected.reason });
+      checks.push({ id: 'adapter', label: 'Adapter status', status: inspected.ok ? 'OK' : 'WARN', message: inspected.ok ? 'Adapter status: OK' : 'Adapter status: WARN', details: inspected.reason });
+      checks.push({ id: 'composer', label: 'Composer detection', status: inspected.composerFound ? 'OK' : 'WARN', message: inspected.composerFound ? 'Composer detection: OK' : 'Composer detection: WARN' });
+      checks.push({ id: 'post-button', label: 'Post Button detection', status: inspected.postButtonFound && inspected.postButtonEnabled ? 'OK' : 'WARN', message: inspected.postButtonFound && inspected.postButtonEnabled ? 'Post Button detection: OK' : 'Post Button detection: WARN' });
     }
-    if (!tabId) {
-      const temporary = await chrome.tabs.create({ url: 'https://x.com/home', active: false });
-      if (!temporary.id) throw new Error('DIAGNOSTICS_TAB_CREATE_FAILED');
-      temporaryTabId = temporary.id; tabId = temporary.id;
-      await waitForTabLoad(tabId);
-    }
-    result.automationTabId = state?.session?.automationTabId;
-    const inspected = await inspectTab(tabId);
-    checks.push({ id: 'x-session', label: 'X Login', status: inspected.pageKind === 'X' ? 'OK' : inspected.pageKind === 'LOGIN' ? 'FAIL' : 'WARN', message: inspected.pageKind === 'X' ? 'X Session: OK' : `X Session: ${inspected.pageKind}`, details: inspected.reason });
-    checks.push({ id: 'adapter', label: 'Adapter status', status: inspected.ok ? 'OK' : 'WARN', message: inspected.ok ? 'Adapter status: OK' : 'Adapter status: WARN', details: inspected.reason });
-    checks.push({ id: 'composer', label: 'Composer detection', status: inspected.composerFound ? 'OK' : 'WARN', message: inspected.composerFound ? 'Composer detection: OK' : 'Composer detection: WARN' });
-    checks.push({ id: 'post-button', label: 'Post Button detection', status: inspected.postButtonFound && inspected.postButtonEnabled ? 'OK' : 'WARN', message: inspected.postButtonFound && inspected.postButtonEnabled ? 'Post Button detection: OK' : 'Post Button detection: WARN' });
   } catch (error) {
     for (const [id, label] of [['x-session', 'X Login'], ['adapter', 'Adapter status'], ['composer', 'Composer detection'], ['post-button', 'Post Button detection']] as const) checks.push({ id, label, status: 'NOT_CHECKED', message: `${label}: NOT_CHECKED`, details: error instanceof Error ? error.message : 'DIAGNOSTICS_INSPECTION_FAILED' });
   } finally {
@@ -71,10 +100,10 @@ async function runDiagnostics(): Promise<DiagnosticsResult> {
     checks.push({ id: 'permissions', label: 'Permissions', status: hasCore && hasXOrigin ? 'OK' : 'WARN', message: hasCore && hasXOrigin ? 'Permissions: OK' : 'Permissions: WARN', details: `core=${hasCore} x=${hasXOrigin}` });
   } catch (error) { checks.push({ id: 'permissions', label: 'Permissions', status: 'FAIL', message: 'Permissions: FAIL', details: error instanceof Error ? error.message : 'PERMISSIONS_READ_FAILED' }); }
   const automationTabId = state?.session?.automationTabId;
-  if (automationTabId) {
+  if (automationTabId && resolveSessionBackend(state?.session, await getSettings()) !== 'LOCAL_RUNNER') {
     try { await chrome.tabs.get(automationTabId); checks.push({ id: 'automation-tab', label: 'Automation Tab', status: 'OK', message: 'Automation Tab: OK', details: String(automationTabId) }); }
     catch { checks.push({ id: 'automation-tab', label: 'Automation Tab', status: 'WARN', message: 'Automation Tab: WARN', details: 'التبويب المسجل غير موجود' }); }
-  } else checks.push({ id: 'automation-tab', label: 'Automation Tab', status: 'WARN', message: 'Automation Tab: غير موجود', details: 'لا توجد جلسة أتمتة نشطة' });
+  } else checks.push({ id: 'automation-tab', label: 'Automation Tab', status: 'WARN', message: 'Automation Tab: غير موجود', details: resolveSessionBackend(state?.session, await getSettings()) === 'LOCAL_RUNNER' ? 'LOCAL_RUNNER mode: no automation tab' : 'لا توجد جلسة أتمتة نشطة' });
   return result;
 }
 
@@ -103,6 +132,35 @@ async function runDryRun(mode: 'FIRST_ITEM' | 'ENTIRE_QUEUE', workspaceId?: stri
   let temporaryTab = false;
   try {
     if (!selected.length) return saveDryRun({ ...result, status: 'COMPLETED', completedAt: Date.now() });
+    const executionBackend = resolveSessionBackend(state.session, await getSettings());
+    if (executionBackend === 'LOCAL_RUNNER') {
+      // LOCAL_RUNNER dry run checks every item through the runner's headless
+      // browser. No X tab is opened in the user's daily Chrome and the publish
+      // action is never invoked (INSPECT only — isolated from the publish
+      // command by the runner's command allowlist).
+      const workspace = (await listWorkspaces(true)).find((item) => item.id === (workspaceId ?? state.workspaceId));
+      for (const item of selected) {
+        if (dryRunStopRequested) break;
+        const started = Date.now();
+        let itemResult: DryRunItemResult;
+        try {
+          const parsed = new URL(item.targetUrl);
+          if (!['http:', 'https:'].includes(parsed.protocol) || !/(^|\.)x\.com$|(^|\.)twitter\.com$/i.test(parsed.hostname)) throw new Error('INVALID_URL');
+          const inspection = await localRunnerBridge.inspect({ workspaceId: workspaceId ?? state.workspaceId ?? '', profileId: workspaceId ?? state.workspaceId ?? '', targetUrl: item.targetUrl, expectedAccount: workspace?.expectedAccount, expectedContent: publishContentFromIntentUrl(item.targetUrl) });
+          itemResult = { queueItemId: item.id, position: item.position, targetUrl: item.targetUrl, status: classifyDryRunInspection({ ok: inspection.composerFound && inspection.contentPresent && inspection.postButtonFound && inspection.postButtonEnabled, pageKind: inspection.pageKind, composerFound: inspection.composerFound, contentPresent: inspection.contentPresent, postButtonFound: inspection.postButtonFound, postButtonEnabled: inspection.postButtonEnabled, reason: inspection.dailyPostLimitReached ? 'X_DAILY_POST_LIMIT_REACHED' : inspection.reason, dailyPostLimitReached: inspection.dailyPostLimitReached }), checkedAt: Date.now(), durationMs: Date.now() - started, pageKind: inspection.pageKind, composerFound: inspection.composerFound, contentPresent: inspection.contentPresent, postButtonFound: inspection.postButtonFound, postButtonEnabled: inspection.postButtonEnabled, reason: inspection.reason };
+        } catch (error) {
+          const reason = error instanceof Error ? error.message : 'UNKNOWN_ERROR';
+          itemResult = { queueItemId: item.id, position: item.position, targetUrl: item.targetUrl, status: reason === 'INVALID_URL' ? 'INVALID_URL' : 'ERROR', checkedAt: Date.now(), durationMs: Date.now() - started, pageKind: 'ERROR', composerFound: false, contentPresent: false, postButtonFound: false, postButtonEnabled: false, reason, error: reason };
+        }
+        result.items.push(itemResult);
+        result.checked = result.items.length;
+        result.ready = result.items.filter((entry) => entry.status === 'READY').length;
+        result.failed = result.checked - result.ready;
+        result.currentItemId = item.id;
+        await saveDryRun({ ...result });
+      }
+      return saveDryRun({ ...result, status: dryRunStopRequested ? 'STOPPED' : 'COMPLETED', completedAt: Date.now(), currentItemId: undefined });
+    }
     if (state.session) {
       tabId = await getOrCreateAutomationTab(state.session);
     } else {
@@ -389,9 +447,34 @@ async function handleMessage(message: RuntimeMessage): Promise<unknown> {
     }
     case 'UPDATE_SETTINGS': {
       await saveSettings(message.settings);
-      const updated = await updateRuntimeState((state) => ({ ...state, session: state.session ? { ...state.session, ...message.settings, updatedAt: Date.now() } : state.session }));
+      // The execution backend is PINNED per session: a settings change while a
+      // session is running must never switch the engine of the current item.
+      const { executionBackend: _pinnedExcluded, ...sessionApplicable } = message.settings;
+      const updated = await updateRuntimeState((state) => ({ ...state, session: state.session ? { ...state.session, ...sessionApplicable, updatedAt: Date.now() } : state.session }));
       await broadcast(updated);
       return updated;
+    }
+    case 'RUNNER_TEST': {
+      const workspaceId = message.workspaceId ?? (await getMeta()).activeWorkspaceId;
+      const outcome = await localRunnerBridge.testConnection(workspaceId, workspaceId);
+      return { ...outcome, status: localRunnerBridge.describe() };
+    }
+    case 'RUNNER_SETUP_LOGIN': {
+      // Explicit user action only: opens the runner's VISIBLE login window for
+      // the profile bound to the workspace. Never triggered automatically by
+      // scheduled sessions or login-expiry detection.
+      const workspaceId = message.workspaceId ?? (await getMeta()).activeWorkspaceId;
+      return localRunnerBridge.openLoginWindow({ workspaceId, profileId: workspaceId });
+    }
+    case 'RUNNER_CANCEL_LOGIN': {
+      const workspaceId = message.workspaceId ?? (await getMeta()).activeWorkspaceId;
+      return localRunnerBridge.closeLoginWindow({ workspaceId, profileId: workspaceId });
+    }
+    case 'RUNNER_RECONCILE': {
+      const state = await getState();
+      const reconciled = await reconcileInterruptedRunnerOperations(state);
+      if (reconciled !== state) await broadcast(reconciled);
+      return reconciled;
     }
     case 'SCHEDULE': return scheduleSession(message.workspaceId ?? (await getMeta()).activeWorkspaceId, message.startAt);
     case 'RESCHEDULE': return scheduleSession(message.workspaceId ?? (await getMeta()).activeWorkspaceId, message.startAt);

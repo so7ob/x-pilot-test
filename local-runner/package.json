@@ -1,0 +1,26 @@
+{
+  "name": "x-pilot-local-runner",
+  "version": "1.5.0",
+  "private": true,
+  "description": "X-Pilot Local Runner — Native Messaging host driving a dedicated headless Chromium via Playwright.",
+  "type": "module",
+  "main": "dist/index.js",
+  "scripts": {
+    "build": "tsc -p tsconfig.json && esbuild src/index.ts --bundle --platform=node --target=node20 --format=esm --outfile=dist/index.js --external:playwright",
+    "start": "node dist/index.js",
+    "test": "node --experimental-strip-types --test tests/*.test.mjs",
+    "test:browser": "node --experimental-strip-types --test tests/browser-flow.integration.test.mjs",
+    "typecheck": "tsc -p tsconfig.json"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "dependencies": {
+    "playwright": "1.49.1"
+  },
+  "devDependencies": {
+    "@types/node": "^22.10.2",
+    "esbuild": "^0.24.2",
+    "typescript": "^5.7.2"
+  }
+}

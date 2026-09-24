@@ -1,5 +1,7 @@
 # X-Pilot
 
+> **v1.5.0:** أُضيف **X-Pilot Local Runner**: محرك تنفيذ محلي (Native Messaging + Node + Playwright) يشغّل النشر والفحوص في متصفح Chromium مستقل بوضع Headless دون فتح أي تبويب X في Chrome المعتاد، مع تثبيت المحرك لكل جلسة، دفتر عمليات دائم يمنع النشر المكرر، تحقق نشر مرتبط بالمحاولة، وربط الحساب المتوقع لكل مساحة عمل. راجع [معمارية Local Runner](docs/local-runner-architecture.md) و[تثبيت Windows](docs/local-runner-install-windows.md).
+
 > **v1.4.0:** فصل محرك الأتمتة في وحدة مستقلة `automation-engine.ts` تمتلك وحدها كود النشر مع عقود معمارية جديدة، وإصلاح كل النصوص العربية الثابتة المتبقية في واجهة الإنجليزية مع عقد يمنع تكرارها.
 
 > **v1.3.0:** اكتملت واجهة الاستعادة: استئناف، بدء من جديد بإعادة العناصر الفاشلة إلى الانتظار بأمان، وإلغاء الجلسة — مع حماية كاملة للعناصر المنشورة وغير المؤكدة.
@@ -93,14 +95,29 @@ npm run build
 
 - `storage`: حفظ Queue والإعدادات والسجل محليًا.
 - `alarms`: جدولة الانتقال التالي.
-- `tabs`: إدارة علامة الأتمتة ومراقبة التحميل.
+- `tabs`: إدارة علامة الأتمتة ومراقبة التحميل (مسار CHROME_TAB فقط).
 - `scripting`: حقن Content Script عند الحاجة.
 - `sidePanel`: واجهة التحكم المستمرة.
 - `activeTab`: مسار أقل صلاحيات للتفاعل مع علامة يفعّلها المستخدم.
+- `nativeMessaging`: الاتصال بـ X-Pilot Local Runner (مسار LOCAL_RUNNER فقط؛ يُطلَق المضيف من Service Worker حصرًا عبر `chrome.runtime.connectNative`).
 - `host_permissions` محددة على `x.com` و`twitter.com` فقط.
 - توجد صلاحية Origin اختيارية في Manifest للنسخ المستقبلية التي تفتح بنوكًا خارجية تلقائيًا؛ يجب طلبها وقت الحاجة فقط.
 
 لا تُستخدم صلاحيات `cookies` أو `webRequest` أو `debugger`، ولا تُرسل البيانات إلى Backend.
+
+## X-Pilot Local Runner (وضع LOCAL_RUNNER)
+
+محرك تنفيذ ثانٍ اختياري يدير المتصفح والنشر في متصفح Chromium مستقل يعمل بوضع Headless عبر Playwright، مع مضيف Native Messaging مسجّل باسم `com.so7ob.x_pilot_runner`. في هذا الوضع:
+
+- لا تفتح الإضافة أي تبويب X في Chrome المعتاد (لا إنشاء ولا تفعيل ولا تغيير للتبويب الحالي) — يشمل النشر والفحص المسبق والتجربة دون نشر والتشخيص.
+- الاستثناء المرئي الوحيد: نافذة إعداد تسجيل الدخول، تفتح بطلب صريح من المستخدم فقط.
+- ملفات الدخول خاصة بـ Runner وخارج المستودع (`%LOCALAPPDATA%\X-Pilot\Runner`)، وكل مساحة عمل مرتبطة بحساب متوقع يُفحص قبل كل نشر.
+- دفتر عمليات دائم داخل Runner يمنع تكرار النشر (نفس `operationId` يعيد النتيجة المسجلة ولا ينفّذ مجددًا).
+- المحرك مثبّت للجلسة؛ لا رجوع تلقائي إلى CHROME_TAB عند فقدان الاتصال — تُوقف العملية بسبب واضح.
+
+التثبيت على Windows: راجع [docs/local-runner-install-windows.md](docs/local-runner-install-windows.md). التطوير والاختبار: `cd local-runner && npm install && npm run build && npm test`.
+
+> **تنبيه مهم:** هذا المسار يعتمد أتمتة واجهة X خارج API الرسمي؛ قد تقيد سياسات X الأتمتة وتؤدي إلى تعليق الحساب. لا يتضمن أي تجاوز لتسجيل الدخول أو CAPTCHA أو حدود المعدل أو أنظمة مكافحة الروبوتات، وعند اكتشاف Login أو تحدٍ أمني تتوقف العملية.
 
 ## Workspaces
 
@@ -110,24 +127,36 @@ npm run build
 
 ## القيود المعروفة في هذه المرحلة
 
-- Selectors الخاصة بـ X قد تحتاج تحديثًا عند تغير الواجهة.
+- Selectors الخاصة بـ X قد تحتاج تحديثًا عند تغير الواجهة (تُشارك بين مسار التبويب ومسار Runner).
 - استخراج Redirect URLs غير منفذ تلقائيًا؛ تُقبل فقط الروابط ذات مضيف X/Twitter مباشرة.
-- نتيجة النشر تستعمل مؤشرًا محافظًا (`PUBLISHED_UNVERIFIED`) عندما لا يمكن التأكد من اختفاء المحرر.
+- نتيجة النشر تستعمل مؤشرًا محافظًا (`PUBLISHED_UNVERIFIED`) عندما لا يتوفر دليل مرتبط بالمحاولة (استجابة CreateTweet أو رابط جديد بعد الضغط).
 - واجهة Refresh Bank وExport/Import وRecovery الكامل بعد كل سيناريو Restart ستكتمل في المراحل التالية.
 - لا تبدأ جلسة غير مكتملة تلقائيًا بعد إعادة التشغيل دون إضافة مسار Resume صريح في الواجهة.
+- مثبّت Local Runner على Windows كُتب ورُوجع لكنه لم يُنفَّذ على جهاز Windows فعلي في دورة التطوير هذه؛ شغّل `install.ps1` ثم «اختبار الاتصال» للتحقق. كذلك لم يُجرَ أي نشر على حساب حقيقي.
+- استمرار الجدولة مرتبط بتشغيل Chrome (الإضافة تملك الجدولة؛ Runner ليس خدمة خلفية مستقلة).
 
 ## البنية
 
 ```text
 src/
 ├── background/service-worker.ts
+├── background/automation-engine.ts
 ├── content/content-entry.ts
 ├── content/providers/x-provider-adapter.ts
 ├── domain/models.ts
 ├── domain/state-machine.ts
+├── domain/execution.ts          ← طبقة محركات التنفيذ (CHROME_TAB | LOCAL_RUNNER)
+├── domain/x-selectors.ts        ← قواعد التعرف المشتركة مع Runner
+├── domain/runner-reconciliation.ts
 ├── extraction/bank-parser.ts
+├── runner/protocol.ts           ← عقد Native Messaging (الإضافة)
+├── runner/local-runner-bridge.ts
 ├── storage/storage-repository.ts
 └── ui/main.tsx
+local-runner/                    ← حزمة X-Pilot Local Runner المستقلة (Node + Playwright)
+├── src/ (index, protocol, commands, ledger, browser, x-flow, x-selectors, profile-store, logging)
+├── install/ (install.ps1, uninstall.ps1, repair.ps1, host manifest, launcher)
+└── tests/ (protocol, ledger, locks, idempotency, live-Chromium integration, host e2e)
 ```
 
 ## الخطة التالية
