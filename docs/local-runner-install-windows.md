@@ -6,7 +6,7 @@
 
 | Requirement | Version | Notes |
 |---|---|---|
-| Windows | 10 or 11, x64 | Developed/automated-tested on Linux; Windows runtime not yet live-verified (see Limitations). |
+| Windows | 10 or 11, x64 | Install scripts run under Windows PowerShell 5.1 (`powershell.exe`). A v1.5.0 first-run crash on 5.1 was reported from a real machine and fixed in v1.5.1. |
 | Node.js | ≥ 20 (LTS recommended) | `node --version` must work in PowerShell. |
 | Playwright Chromium | bundled by `npm install` + `npx playwright install chromium` | ~100–170 MB download, first time only. |
 | Chrome | stable with Side Panel support | The X-Pilot extension build (`dist/`) loaded unpacked. |
@@ -94,6 +94,7 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -PurgeData
 
 | UI state / code | Meaning | Action |
 |---|---|---|
+| Installer: `Split-Path: Cannot bind argument ... empty string` | v1.5.0 bug: `$PSScriptRoot` was read inside a `param()` default (empty on Windows PowerShell 5.1) | Fixed in v1.5.1. With the v1.5.0 zip you can also pass `-RunnerHome <path to local-runner>` explicitly. |
 | Not installed (`RUNNER_NOT_INSTALLED`) | Host manifest missing | Run install.ps1 with the correct extension id. |
 | Failed to start (`RUNNER_LAUNCH_FAILED`) | Host registered but the process fails | Check `logs\runner.log`; verify Node ≥ 20. |
 | Protocol mismatch (`RUNNER_PROTOCOL_MISMATCH`) | Extension/runner versions disagree | Update the runner (`repair.ps1`) and reload the extension. |
@@ -103,11 +104,12 @@ powershell -ExecutionPolicy Bypass -File .\uninstall.ps1 -PurgeData
 
 ## Limitations (explicit)
 
-- The installer and HKCU registration were authored for Windows and reviewed,
-  but **not executed on a Windows machine in this development cycle** — the
-  automated suite (protocol, ledger, lock, commands, real-Chromium flow, and
-  the built-host end-to-end test) ran on Linux. Run the installer once on
-  Windows and press **Test connection** to confirm.
+- The installer has now been executed on a real Windows machine (v1.5.0): it
+  crashed at startup under Windows PowerShell 5.1 before taking any action;
+  the root cause (`$PSScriptRoot` empty inside `param()` defaults on 5.1) was
+  fixed in **v1.5.1** and guarded by architecture-contract tests. Re-run
+  `install.ps1` on Windows and press **Test connection** to confirm the full
+  path end-to-end.
 - No live publish against x.com was performed during development.
 - X UI changes can break selectors; the runner shares the adapter's selector
   rules so fixes apply to both engines together.
