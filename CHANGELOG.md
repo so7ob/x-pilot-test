@@ -1,4 +1,20 @@
 # Changelog
+## [1.5.2] - Patch - Native Host Launch Reliability on Windows (BOM-free manifest + doctor)
+### Fixed
+- إصلاح خطأ Chrome **«Error when communicating with the native messaging host.»** الذي ظهر على جهاز Windows حقيقي بعد تثبيت v1.5.1 كاملًا وضغط «اختبار الاتصال» (المشكلة رقم 6): كان `install.ps1` يكتب ملف manifest المضيف عبر `Set-Content -Encoding UTF8`، وهذا الأمر **يضيف BOM (EF BB BF) دائمًا على Windows PowerShell 5.1**، وقارئ JSON الصارم لدى Chrome يرفض أي manifest يبدأ بـ BOM — فيُعدّ المضيف غير قابل للتشغيل ويفشل كل `connectNative` قبل تنفيذ المطلِق أو Node أصلًا، وتظهر الإضافة الحالة `RUNNER_LAUNCH_FAILED`. (PowerShell 7 يكتب بدون BOM، ولهذا لم يُكتشف الخطأ في التطوير على Linux؛ واختبار e2e للمضيف يتحدث عبر stdin/stdout مباشرة فلا يمر بملف التسجيل.)
+- أصبح manifest يُكتب عبر `[System.IO.File]::WriteAllText` مع `New-Object System.Text.UTF8Encoding($false)` (بدون BOM صراحةً)، مع **تحقق ذاتي بعد الكتابة**: رفض أي BOM بايت-ببايت، إعادة تحليل JSON، ومطابقة كل حقول Chrome المطلوبة (name/type/path/allowed_origins) وتأكيد وجود المطلِق — فشل التسجيل يُعلن بصوت عالٍ لحظة التثبيت لا لحظة «اختبار الاتصال».
+- تسجيل قيمة Registry الافتراضية عبر واجهة .NET الصريحة (`[Microsoft.Win32.Registry]::CurrentUser ... SetValue('', ...)`) مع **قراءة مرتدة** ومقارنة، بدل النمط الملتبس `Set-ItemProperty '(Default)'`.
+
+### Added
+- **أداة تشخيص جديدة `local-runner/install/doctor.ps1`**: تتحقق من السلسلة كاملة (Node ≥ 20، ملفات الحزمة، مفتاح HKCU وقيمته الفعلية، بايتات manifest مع كشف BOM وصيغة JSON وallowed_origins، وجود dist والمطلِق) ثم تنفّذ **اختبار PING مُأطرًا حيًا** عبر نفس ما يشغّله Chrome — مرة مباشرة بـ `node dist\index.js` ومرة عبر `cmd.exe /c x-pilot-runner.cmd` — وتعرض ذيول `runner.log` و`host-stderr.log`؛ كود الخروج 0 فقط عند نجاح كل الفحوص.
+- **التقاط أخطاء إقلاع المضيف**: قالب المطلِق `x-pilot-runner.cmd` يوجّه stderr إلى `%LOCALAPPDATA%\X-Pilot\Runner\logs\host-stderr.log` (يُتجاوز التوجيه إذا تعذر إنشاء الدليل كي لا يكسر التشخيص الإطلاق مطلقًا) — stdout يبقى محجوزًا حصريًا لبروتوكول Native Messaging دون أي توجيه.
+- 6 عقود معمارية جديدة في `tests/installer-scripts.test.mjs` (المجموع 11 في الملف): منع كتابة الـmanifest بـ Set-Content/Out-File، إلزام الترميز بدون BOM مع WriteAllText، إلزام التحقق الذاتي للبايتات والحقول، إلزام تسجيل .NET مع القراءة المرتدة، سلامة قالب المطلِق (التقاط stderr دون أي توجيه لـstdout + ASCII خالص)، وإلزام وجود doctor.ps1 وASCII خالص لكل السكربتات (PS 5.1 يقرأ السكربتات بدون BOM كـ ANSI) — مع إثبات أن كل الأنماط القديمة السبعة لـ v1.5.1 تُضبط بالعقود الجديدة.
+
+### Safety
+- **لا تغيير إطلاقًا** في بروتوكول المضيف أو منطق النشر/الجدولة/التخزين أو واجهة الإضافة؛ التعديل مقتصر على سلسلة التثبيت والتشخيص على Windows (اختبارات Runner بقيت 50/50 كما هي).
+- الإصدار 1.5.2 متزامن في package.json وpublic/manifest.json وlocal-runner/package.json.
+- حل فوري لمستخدمي v1.5.0/v1.5.1 دون إعادة تحميل: أمر PowerShell واحد يعيد كتابة الـmanifest بدون BOM (موثق في المشكلة رقم 6 وفي دليل التثبيت) ثم إعادة تشغيل Chrome كاملة.
+
 ## [1.5.1] - Patch - Windows Installer PowerShell 5.1 Compatibility
 ### Fixed
 - إصلاح انهيار مثبّت Windows عند أول تشغيل على Windows PowerShell 5.1 (`powershell.exe`): كانت السكربتات الثلاث (install/repair/uninstall) تحل `RunnerHome` داخل **قيمة معامل افتراضية** باستخدام `$PSScriptRoot`، وهو **فارغ في مرحلة تقييم القيم الافتراضية على PowerShell 5.1** (يعمل فقط في جسم السكربت أو في PowerShell 7+)، فتسبب ذلك في `Split-Path: Cannot bind argument to parameter 'Path' because it is an empty string` قبل تنفيذ أي خطوة. أصبح الحل يتم في جسم السكربت مع حارس `IsNullOrWhiteSpace` صريح، مع تفضيل `$PSScriptRoot` في الجسم وحل بديل عبر `$MyInvocation.MyCommand.Path` — وتمرير `-RunnerHome` يدويًا يبقى كما هو دون تغيير.
