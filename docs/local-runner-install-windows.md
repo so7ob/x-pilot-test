@@ -61,10 +61,13 @@
 4. In X-Pilot (Side Panel → Settings → Local Runner):
    1. Press **Test connection** — the runner version and protocol must show
       `Connected`.
-   2. Press **Set up login** once — a visible browser window opens. Sign in
-      to X inside it, then close it. The runner re-opens the profile headless
-      and verifies the session persisted; the detected account appears in the
-      card.
+   2. Press **Set up login** once — a visible browser window opens (it uses
+      your installed Google Chrome on the runner's own profile directory,
+      never your daily Chrome profile; since v1.5.4 it also no longer carries
+      automation marks, so X's stepwise login and "Continue with Google"
+      both work). Sign in to X inside it, then close it. The runner re-opens
+      the profile headless and verifies the session persisted; the detected
+      account appears in the card.
    3. Set the **expected account** for the workspace (handle without `@`).
       Publishing stops if the runner profile is signed in as a different
       account.
@@ -135,6 +138,8 @@ Chrome via `chrome://restart`).
 | Failed to start (`RUNNER_LAUNCH_FAILED`) | Host registered but the process fails | Run `install\doctor.ps1`; check `logs\runner.log` and `logs\host-stderr.log`; verify Node >= 20. |
 | Protocol mismatch (`RUNNER_PROTOCOL_MISMATCH`) | Extension/runner versions disagree | Update the runner (`repair.ps1`) and reload the extension. |
 | Login expired (`RUNNER_LOGIN_REQUIRED`) | Runner profile session invalid | Press Set up login again. |
+| X login form stalls silently after entering the username (≤ v1.5.3) | The login window exposed `navigator.webdriver === true` (Playwright `--enable-automation`, no anti-automation flags in headed mode) — X's login flow refuses to advance in automation-flagged browsers | **Install v1.5.4** (issue #12: anti-automation launch profile in both modes). |
+| Google sign-in in the login window: «تعذّر تسجيل الدخول — قد يكون هذا المتصفّح أو التطبيق غير آمن» / "This browser or app may not be secure" (≤ v1.5.3) | Google refuses automation-flagged and generic Chromium builds; the X login page offers "Continue with Google" | **Install v1.5.4** — the login window now prefers the installed branded Google Chrome (`channel: 'chrome'`) with automation marks removed. If you have no branded Chrome installed, the runner logs a fallback warning and X's email login still works, but Google sign-in may be refused. |
 | Profile in use (`RUNNER_PROFILE_LOCKED`) | Another process/session owns the profile | Close the other session (or login window) and retry. |
 | Account mismatch (`RUNNER_ACCOUNT_MISMATCH`) | Signed-in account ≠ workspace expected account | Fix the login or update the expected account. |
 
@@ -151,6 +156,13 @@ Chrome via `chrome://restart`).
   `x-pilot-runner.exe` on the direct-launch path. Re-run `install.ps1`, then
   `install\doctor.ps1`, then **Test connection** to confirm the full path
   end-to-end.
+- v1.5.4 (issue #12): the login window's automation marks were measured on
+  real Chromium (`navigator.webdriver = true` with the v1.5.3 options,
+  `undefined` after the fix) and the new `channel: 'chrome'` preference is
+  covered by unit contracts with a fake Playwright factory. The final
+  confirmation of the live x.com / Google sign-in flow rests with the
+  reporter's machine (the dev environment has no display and no branded
+  Chrome).
 - No live publish against x.com was performed during development.
 - X UI changes can break selectors; the runner shares the adapter's selector
   rules so fixes apply to both engines together.
