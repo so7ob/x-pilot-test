@@ -1,25 +1,19 @@
 import type { ContentInspection } from '../../domain/models';
+import {
+  accountFromProfileHref,
+  accountLinkSelectors,
+  composerSelectors,
+  confirmationToastSelectors,
+  dailyPostLimitPattern,
+  excludedLabelPattern,
+  isDailyPostLimitMessage,
+  isPublishButtonLabel,
+  normalizeControlLabel,
+  postButtonSelectors,
+  publishTestIdPattern
+} from '../../domain/x-selectors.ts';
 
-const composerSelectors = [
-  '[data-testid="tweetTextarea_0"]',
-  '[contenteditable="true"][role="textbox"]',
-  'div[role="textbox"][contenteditable="true"]',
-  '[data-testid="tweetTextarea_0"] [contenteditable="true"]',
-  'textarea[aria-label*="Post"]',
-  'textarea[aria-label*="Tweet"]',
-  'textarea[aria-label*="نص المنشور"]',
-  'textarea[aria-label*="منشور"]',
-  'textarea[placeholder*="Post"]',
-  'textarea[placeholder*="Tweet"]',
-  'textarea[placeholder*="منشور"]'
-];
-
-const publishTestIdPattern = /(?:tweet|post|publish).*button|button.*(?:tweet|post|publish)/iu;
-const excludedLabelPattern = /(?:إضافة|الكل|رد|reply|add|cancel|إلغاء)/iu;
-const publishLabelPattern = /^(?:نشر|نشر\s+المنشور|إرسال|post|tweet|publish|send)$/iu;
-const dailyPostLimitPattern = /(?:لقد\s+وصلت\s+إلى\s+الحد\s+الأقصى\s+لعدد\s+المنشورات\s+اليومية|الحد\s+الأقصى\s+لعدد\s+المنشورات\s+اليومية|you(?:'|’)?ve\s+reached\s+(?:the\s+)?daily\s+(?:post|posts?)\s+limit|daily\s+post(?:ing)?\s+limit|subscribe\s+to\s+premium.*limit)/iu;
-
-function findFirst(selectors: string[]): HTMLElement | null {
+function findFirst(selectors: readonly string[]): HTMLElement | null {
   for (const selector of selectors) {
     const element = document.querySelector<HTMLElement>(selector);
     if (element && isVisibleControl(element)) return element;
@@ -31,25 +25,7 @@ function readText(element: HTMLElement): string {
   return (element instanceof HTMLTextAreaElement ? element.value : element.innerText || element.textContent || '').trim();
 }
 
-export function normalizeControlLabel(value: string): string {
-  return value
-    .normalize('NFKC')
-    .replace(/[\u064B-\u065F\u0670\u06D6-\u06ED]/gu, '')
-    .replace(/\u0640/gu, '')
-    .replace(/[\u200B-\u200D\uFEFF]/gu, '')
-    .replace(/\s+/gu, ' ')
-    .trim()
-    .toLocaleLowerCase();
-}
-
-export function isPublishButtonLabel(value: string): boolean {
-  const label = normalizeControlLabel(value);
-  return Boolean(label) && !excludedLabelPattern.test(label) && publishLabelPattern.test(label);
-}
-
-export function isDailyPostLimitMessage(value: string): boolean {
-  return dailyPostLimitPattern.test(value.normalize('NFKC'));
-}
+export { normalizeControlLabel, isPublishButtonLabel, isDailyPostLimitMessage };
 
 function isVisibleControl(element: HTMLElement): boolean {
   if (!element.isConnected || element.hidden || element.getAttribute('aria-hidden') === 'true') return false;
@@ -80,14 +56,46 @@ function isPublishControl(element: HTMLElement): boolean {
 }
 
 function findPostButton(): HTMLElement | null {
-  const selected = findFirst(['[data-testid="tweetButtonInline"]', '[data-testid="tweetButton"]', 'button[data-testid*="tweetButton"]', 'button[aria-label="Post"]', 'button[aria-label="Tweet"]', 'button[aria-label="نشر"]', 'button[aria-label="غرد"]']);
+  const selected = findFirst(postButtonSelectors);
   if (selected && isPublishControl(selected)) return selected;
   return Array.from(document.querySelectorAll<HTMLElement>('button,[role="button"],[data-testid*="tweetButton"],[data-testid*="postButton"]')).find(isPublishControl) ?? null;
 }
 
+/** Returns the signed-in account handle using the profile link (secondary evidence, also used by diagnostics). */
+export function detectAccountHandle(): string | undefined {
+  for (const selector of accountLinkSelectors) {
+    const anchor = document.querySelector<HTMLAnchorElement>(selector);
+    const href = anchor?.getAttribute('href');
+    if (href) {
+      const handle = accountFromProfileHref(href);
+      if (handle) return handle;
+    }
+  }
+  return undefined;
+}
+
+/** Status links currently visible on the page, used to bind publish evidence to THIS attempt. */
+export function collectStatusLinks(): string[] {
+  return Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/status/"]'))
+    .map((anchor) => anchor.href)
+    .filter((href) => /^https?:\/\/(?:www\.)?(?:x|twitter)\.com\/[^/]+\/status\/\d+/i.test(href));
+}
+
+/** True when the X "post was sent" toast is visible (secondary evidence only). */
+export function isConfirmationToastVisible(): boolean {
+  for (const selector of confirmationToastSelectors) {
+    const element = document.querySelector<HTMLElement>(selector);
+    if (element && isVisibleControl(element)) {
+      const text = readText(element);
+      if (/your (?:post|tweet) was sent|تم إرسال (?:منشورك|تغريدتك)/iu.test(text)) return true;
+    }
+  }
+  return false;
+}
+
 export function inspect(): ContentInspection {
   const host = location.hostname.toLowerCase();
-  if (!['x.com', 'twitter.com', 'www.x.com', 'www.twitter.com'].includes(host)) {
+  if (!INTENT_HOSTS_CHECK(host)) {
     return { ok: false, pageKind: 'UNKNOWN', composerFound: false, contentPresent: false, postButtonFound: false, postButtonEnabled: false, reason: 'WRONG_HOST' };
   }
   const body = document.body?.innerText?.toLocaleLowerCase() ?? '';
@@ -107,6 +115,12 @@ export function inspect(): ContentInspection {
   const ok = Boolean(composer && contentPresent && postButton && postButtonEnabled);
   return { ok, pageKind: 'X', composerFound: Boolean(composer), contentPresent, postButtonFound: Boolean(postButton), postButtonEnabled, reason: ok ? undefined : 'PUBLISH_CONTROLS_NOT_READY', dailyPostLimitReached: false };
 }
+
+function INTENT_HOSTS_CHECK(host: string): boolean {
+  return ['x.com', 'twitter.com', 'www.x.com', 'www.twitter.com'].includes(host);
+}
+
+export { dailyPostLimitPattern };
 
 export function getPublishedPostUrl(): string | undefined {
   const statusLinks = Array.from(document.querySelectorAll<HTMLAnchorElement>('a[href*="/status/"]'))

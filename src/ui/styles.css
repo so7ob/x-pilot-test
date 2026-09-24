@@ -335,9 +335,16 @@ button.danger:hover, .ui-button-danger:hover { border-color: #df9c99; }
 .session-attempts .primary-link, .session-attempts .secondary-link { display: inline-block; margin: 5px 8px 0 0; font-size: 11px; }
 .settings-card { display: grid; gap: 14px; }
 .settings-card > label { margin-top: 0; }
-.settings-card .publishing-windows-editor, .settings-card .profile-actions, .settings-card .backup-actions { margin-top: 0; padding: 14px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-2); }
-.settings-card .profile-actions, .settings-card .backup-actions { display: grid; gap: 10px; }
-.settings-card .profile-actions h3, .settings-card .backup-actions h3, .settings-card .profile-actions p, .settings-card .backup-actions p { margin-bottom: 0; }
+.settings-card .publishing-windows-editor, .settings-card .profile-actions, .settings-card .backup-actions, .settings-card .runner-actions { margin-top: 0; padding: 14px; border: 1px solid var(--color-border); border-radius: var(--radius-md); background: var(--color-surface-2); }
+.settings-card .profile-actions, .settings-card .backup-actions, .settings-card .runner-actions { display: grid; gap: 10px; }
+.settings-card .profile-actions h3, .settings-card .backup-actions h3, .settings-card .runner-actions h3, .settings-card .profile-actions p, .settings-card .backup-actions p, .settings-card .runner-actions p { margin-bottom: 0; }
+.settings-card .runner-actions .controls-row { display: flex; flex-wrap: wrap; align-items: center; gap: 8px; }
+.runner-state { display: inline-flex; align-items: center; padding: 3px 10px; border-radius: 999px; font-size: 11px; font-weight: 600; border: 1px solid var(--color-border); background: var(--color-surface); }
+.runner-state-connected { border-color: #1f7a4d; color: #15694b; background: #e8f6ef; }
+.runner-state-disconnected, .runner-state-launch_failed { border-color: #b42318; color: #b42318; background: #fdeceb; }
+.runner-state-protocol_mismatch, .runner-state-not_installed { border-color: #b54708; color: #b54708; background: #fef3e2; }
+.runner-account-mismatch { color: #b42318; font-size: 11px; font-weight: 600; }
+.error-inline { color: #b42318; font-size: 12px; line-height: 1.4; margin: 0; }
 .settings-card .profile-actions h3, .settings-card .profile-actions p, .settings-card .backup-actions h3, .settings-card .backup-actions p { grid-column: 1 / -1; }
 .settings-card .profile-actions { grid-template-columns: repeat(2, minmax(0, 1fr)); }
 .settings-card .profile-actions button, .settings-card .backup-actions button, .settings-card .backup-actions .button-like { width: 100%; min-width: 0; }

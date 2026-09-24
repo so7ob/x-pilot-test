@@ -1,0 +1,12 @@
+# X-Pilot Local Runner — Windows launcher (rendered by install.ps1).
+# Pure ASCII by design: the runner home is resolved at RUNTIME via %~dp0 so
+# install paths with spaces or non-ASCII characters (e.g. Arabic usernames)
+# never appear literally in this file. %~dp0 always expands with the exact
+# bytes of the real filesystem path, quoted where used.
+@echo off
+setlocal
+set "RUNNER_HOME=%~dp0"
+set "NODE_EXE=__NODE_EXE__"
+if not exist "%NODE_EXE%" set "NODE_EXE=node"
+"%NODE_EXE%" "%RUNNER_HOME%dist\index.js" %*
+endlocal

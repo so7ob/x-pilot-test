@@ -1,0 +1,10 @@
+{
+  "_comment": "Template only. install.ps1 renders the real host manifest with the actual extension id and absolute paths. Never register this file directly.",
+  "name": "com.so7ob.x_pilot_runner",
+  "description": "X-Pilot Local Runner — drives a dedicated headless Chromium to execute X-Pilot publishing operations.",
+  "path": "C:\\PLACEHOLDER\\x-pilot-runner.cmd",
+  "type": "stdio",
+  "allowed_origins": [
+    "chrome-extension://PLACEHOLDER_EXTENSION_ID/"
+  ]
+}

@@ -31,6 +31,7 @@ export type TranslationTree = {
   badges: Record<string, string>;
   duplicatePolicy: Record<string, string>;
   connection: Record<string, string>;
+  runner: Record<string, string | Record<string, string>>;
   recovery: Record<string, string>;
   prompts: Record<string, string>;
   confirm: Record<string, string>;
