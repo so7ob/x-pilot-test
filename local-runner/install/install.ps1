@@ -36,12 +36,20 @@ param(
   [ValidatePattern('^[a-p]{32}$')]
   [string]$ExtensionId,
 
-  [string]$RunnerHome = (Split-Path -Parent $PSScriptRoot),
+  [string]$RunnerHome = '',
 
   [switch]$SkipBrowserDownload
 )
 
 $ErrorActionPreference = 'Stop'
+
+# Resolve -RunnerHome inside the script body: $PSScriptRoot is EMPTY while
+# parameter default values are evaluated under Windows PowerShell 5.1 (it is
+# only populated in the body), so it must never appear in a param() default.
+if ([string]::IsNullOrWhiteSpace($RunnerHome)) {
+  $scriptDir = if ($PSScriptRoot) { $PSScriptRoot } else { Split-Path -Parent $MyInvocation.MyCommand.Path }
+  $RunnerHome = Split-Path -Parent $scriptDir
+}
 
 $hostName = 'com.so7ob.x_pilot_runner'
 $manifestsDir = Join-Path $env:LOCALAPPDATA 'X-Pilot\NativeMessagingHosts'

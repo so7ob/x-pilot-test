@@ -1,4 +1,17 @@
 # Changelog
+## [1.5.1] - Patch - Windows Installer PowerShell 5.1 Compatibility
+### Fixed
+- إصلاح انهيار مثبّت Windows عند أول تشغيل على Windows PowerShell 5.1 (`powershell.exe`): كانت السكربتات الثلاث (install/repair/uninstall) تحل `RunnerHome` داخل **قيمة معامل افتراضية** باستخدام `$PSScriptRoot`، وهو **فارغ في مرحلة تقييم القيم الافتراضية على PowerShell 5.1** (يعمل فقط في جسم السكربت أو في PowerShell 7+)، فتسبب ذلك في `Split-Path: Cannot bind argument to parameter 'Path' because it is an empty string` قبل تنفيذ أي خطوة. أصبح الحل يتم في جسم السكربت مع حارس `IsNullOrWhiteSpace` صريح، مع تفضيل `$PSScriptRoot` في الجسم وحل بديل عبر `$MyInvocation.MyCommand.Path` — وتمرير `-RunnerHome` يدويًا يبقى كما هو دون تغيير.
+- الحادث أُبلغ عنه من جهاز Windows حقيقي (المستخدم شغّل حزمة v1.5.0 الصادرة)، ولم يكن الانكسار يترك أي حالة جزئية (الانهيار قبل npm install وقبل كتابة Registry أو Manifest).
+
+### Added
+- عقد معماري جديد (`tests/installer-scripts.test.mjs`، 5 اختبارات) يمنع عودة الخطأ: يمنع ظهور `$PSScriptRoot` أو `Split-Path` أو `$MyInvocation` داخل كتل `param()` في سكربتات التثبيت، ويوجب حارس حل `RunnerHome` في الجسم مع الحلين البديلين، ويمنع صيغ PowerShell 7 حصرية (`??` و`?.`) لأن نقطة الدخول الموثقة هي `powershell.exe` 5.1 — مع إثبات أن العقد يفشل على النمط القديم.
+
+### Safety
+- لا تغيير إطلاقًا في سلوك الإضافة أو النشر أو الجدولة أو التخزين أو بروتوكول Native Messaging؛ الإصلاح مقتصر على سكربتات تثبيت Windows.
+- الإصدار 1.5.1 متزامن في package.json وpublic/manifest.json وlocal-runner/package.json.
+- الاختبارات: الإضافة 234 (كانت 229) وRunner 50، والبناء والفحص النظيف ناجحان.
+
 ## [1.5.0] - Feature - X-Pilot Local Runner (Headless Native Execution)
 ### Added
 - **X-Pilot Local Runner**: محرك تنفيذ محلي جديد يدير متصفح Chromium مستقل بوضع Headless عبر Playwright وNative Messaging، بحيث تُنفَّذ عمليات النشر والفحص المسبق والتجربة دون نشر والتشخيص داخل متصفح Runner الخاص دون فتح أي تبويب X في Chrome المعتاد للمستخدم ودون تغيير صفحته الحالية. (الاستثناء المرئي الوحيد: نافذة إعداد تسجيل الدخول التي تفتح بطلب صريح من المستخدم).
