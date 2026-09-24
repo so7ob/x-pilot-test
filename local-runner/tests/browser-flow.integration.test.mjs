@@ -273,3 +273,25 @@ test('profile lock blocks a second concurrent context on the same profile dir', 
     await context.close();
   });
 });
+
+test('runner-launched contexts never expose navigator.webdriver (issue #12: X and Google refuse automated-looking browsers)', async () => {
+  // The v1.5.3 login window exposed navigator.webdriver === true (Playwright
+  // default --enable-automation, no AutomationControlled disable, no
+  // neutralizer): X's login flow stalled silently after the username step and
+  // Google's sign-in refused with "This browser or app may not be secure".
+  // This test runs the REAL bundled Chromium through BrowserManager and pins
+  // the anti-automation profile end to end.
+  await withFixture(async () => {
+    const browsers = new BrowserManager(silentLogger);
+    try {
+      const context = await browsers.openContext('ws-webdriver', { headless: true });
+      const page = await context.newPage();
+      await page.goto('about:blank');
+      const webdriver = await page.evaluate(() => navigator.webdriver);
+      assert.notEqual(webdriver, true, 'navigator.webdriver must never be true in a runner-launched context (X login stall + Google "browser not secure")');
+      await page.close().catch(() => undefined);
+    } finally {
+      await browsers.closeAll();
+    }
+  });
+});

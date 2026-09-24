@@ -117,6 +117,24 @@ quarantines the item, and the outcome is settled explicitly through
   via `chromium.launchPersistentContext` with `channel: 'chromium'` (the full
   Chromium binary in new-headless mode — the minimal headless shell does not
   persist cookies, which would break login persistence; verified by test).
+- **Anti-automation launch profile (v1.5.4, issue #12):** Playwright's
+  default `--enable-automation` switch is dropped (`ignoreDefaultArgs`) and
+  `--disable-blink-features=AutomationControlled` is applied in **both**
+  modes, plus one init script shadowing `navigator.webdriver` to `undefined`.
+  Measured on real Chromium: the v1.5.3 login window exposed
+  `navigator.webdriver === true`, which made X's login flow stall silently
+  after the username step and made Google's sign-in page refuse with
+  "This browser or app may not be secure". This is not a challenge bypass
+  and not fingerprint spoofing (no fake UA/plugins/WebGL, no stealth
+  dependencies): CAPTCHAs, challenges and daily limits still stop operations
+  with explicit codes, and the login window stays 100% human-driven.
+- **Login-window binary (v1.5.4):** the visible login window prefers the
+  installed, branded Google Chrome (`channel: 'chrome'`) because Google's
+  sign-in page — offered by X's login as "Continue with Google" — refuses
+  generic Chromium builds. It still uses the runner's OWN dedicated
+  user-data directory (never the user's daily Chrome profile or session) and
+  falls back to bundled Chromium with a logged warning when no branded
+  Chrome exists. Headless INSPECT/PUBLISH stay on bundled Chromium.
 - Profile directories live under `%LOCALAPPDATA%\X-Pilot\Runner\profiles\<workspaceId>`
   — **outside the repository**, never in Git, not part of extension backups.
 - A PID-based lockfile prevents two runner processes (or the visible login

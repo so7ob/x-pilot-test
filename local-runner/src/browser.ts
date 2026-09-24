@@ -8,12 +8,42 @@
  * - Idle contexts are closed automatically; CLEANUP closes them immediately.
  * - The runner only closes processes it launched itself.
  */
-
 import type { BrowserContext } from 'playwright';
 import { ProfileLock, profilePaths, ProfileLockError, type ProfilePaths } from './profile-store.ts';
 import { RunnerLogger } from './logging.ts';
 
 const IDLE_CLOSE_MS = 5 * 60 * 1000;
+
+/**
+ * Anti-automation launch profile (issue #12).
+ *
+ * Playwright marks every Chromium it launches as automated: the default
+ * `--enable-automation` switch enables the AutomationControlled blink
+ * feature, which exposes `navigator.webdriver === true` (plus the
+ * "controlled by automated test software" infobar). Two independent
+ * providers refuse such browsers during the human-driven login window:
+ * - X's login flow silently refuses to advance past the username step.
+ * - Google's sign-in page rejects with "This browser or app may not be
+ *   secure" (the X login page offers "Continue with Google").
+ *
+ * The runner therefore removes the automation marks in BOTH modes:
+ * - `ignoreDefaultArgs` drops Playwright's `--enable-automation` switch.
+ * - `--disable-blink-features=AutomationControlled` stops the feature from
+ *   being enabled by any other path (previously applied to headless ONLY —
+ *   the login window, the one place a human types credentials, was missed).
+ * - One init script shadows any residual `navigator.webdriver` exposure to
+ *   `undefined` before any page script runs (defense in depth for Chromium
+ *   builds where the flags alone are insufficient).
+ *
+ * Policy (unchanged, see x-flow.ts): this is NOT a challenge bypass and NOT
+ * fingerprint spoofing — CAPTCHAs, verification steps and daily limits still
+ * stop operations with explicit codes, no fake user-agent/plugins/WebGL are
+ * injected, and the login window stays 100% human-driven. The launched
+ * browser simply stops self-identifying as automation.
+ */
+const ANTI_AUTOMATION_ARGS: string[] = ['--disable-blink-features=AutomationControlled'];
+const IGNORED_DEFAULT_ARGS: string[] = ['--enable-automation'];
+const WEBDRIVER_NEUTRALIZER_INIT_SCRIPT = 'Object.defineProperty(navigator, "webdriver", { get: () => undefined, configurable: true });';
 
 export interface LaunchOptions {
   headless: boolean;
@@ -83,16 +113,10 @@ export class BrowserManager {
     await entry.lock.acquire(requestedMode === 'headless' ? 'headless-session' : 'login-window');
     const playwright = await this.playwrightFactory();
     try {
-      // channel: 'chromium' selects the FULL Chromium binary in new-headless
-      // mode. The minimal headless shell does NOT persist cookies to the
-      // profile directory, which would break login persistence between the
-      // visible login window and headless sessions.
-      const context = await playwright.chromium.launchPersistentContext(entry.paths.profileDir, {
-        channel: 'chromium',
+      const context = await this.launchPersistentContext(playwright, entry.paths.profileDir, {
         headless: options.headless,
         viewport: options.headless ? { width: 1280, height: 900 } : undefined,
-        timeout: options.timeoutMs ?? 60_000,
-        args: options.headless ? ['--disable-blink-features=AutomationControlled'] : [],
+        timeoutMs: options.timeoutMs ?? 60_000,
       });
       entry.context = context;
       entry.mode = requestedMode;
@@ -114,6 +138,55 @@ export class BrowserManager {
       this.logger.error('browser launch failed', { profileId, message });
       throw new Error(`RUNNER_LAUNCH_FAILED:${message}`);
     }
+  }
+
+  /**
+   * Launches the persistent context with the anti-automation profile.
+   *
+   * Binary choice:
+   * - Headless operations → the bundled full Chromium (channel: 'chromium',
+   *   new-headless mode; the minimal headless shell does NOT persist cookies).
+   * - The login window (headed) → the INSTALLED, branded Google Chrome
+   *   (channel: 'chrome') when available: Google's sign-in page — offered by
+   *   the X login page as "Continue with Google" — refuses generic Chromium
+   *   builds with "This browser or app may not be secure". Still the Runner's
+   *   OWN dedicated user-data directory: never the user's daily Chrome profile
+   *   or session. Falls back to bundled Chromium (with a warning) when no
+   *   branded Chrome is installed; X's own email login still works there.
+   */
+  private async launchPersistentContext(
+    playwright: Awaited<ReturnType<PlaywrightFactory>>,
+    profileDir: string,
+    options: { headless: boolean; viewport?: { width: number; height: number }; timeoutMs: number },
+  ): Promise<BrowserContext> {
+    const launchOptions: Record<string, unknown> = {
+      headless: options.headless,
+      viewport: options.viewport,
+      timeout: options.timeoutMs,
+      args: ANTI_AUTOMATION_ARGS,
+      ignoreDefaultArgs: IGNORED_DEFAULT_ARGS,
+    };
+    let context: BrowserContext;
+    if (!options.headless) {
+      try {
+        context = await playwright.chromium.launchPersistentContext(profileDir, { ...launchOptions, channel: 'chrome' });
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        this.logger.warn('installed Google Chrome unavailable for the login window; falling back to bundled Chromium (Google sign-in on the X login page may be refused there)', { message });
+        context = await playwright.chromium.launchPersistentContext(profileDir, { ...launchOptions, channel: 'chromium' });
+      }
+    } else {
+      context = await playwright.chromium.launchPersistentContext(profileDir, { ...launchOptions, channel: 'chromium' });
+    }
+    // Registered before any navigation to x.com: every page created in this
+    // context (login window, INSPECT, PUBLISH) evaluates it first.
+    try {
+      await context.addInitScript(WEBDRIVER_NEUTRALIZER_INIT_SCRIPT);
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      this.logger.warn('webdriver neutralizer init script registration failed', { message });
+    }
+    return context;
   }
 
   async closeContext(profileId: string): Promise<void> {
