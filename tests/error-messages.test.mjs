@@ -43,3 +43,21 @@ test("raw content-script delivery failure localizes for the user (issue #15)", a
   // Unrelated messages pass through untouched.
   assert.equal(getUserFacingMessage('some unrelated failure'), 'some unrelated failure');
 });
+
+test("raw script-injection failure localizes for the user (issue #18)", async () => {
+  await setLanguagePreference('EN');
+  assert.equal(
+    getUserFacingMessage('Cannot access contents of the page').includes('Could not inject the page script into the X tab'),
+    true,
+  );
+  await setLanguagePreference('AR');
+  assert.equal(
+    getUserFacingMessage('Cannot access contents of the page').includes('تعذّر حقن سكربت الصفحة'),
+    true,
+  );
+  // The full raw Chrome sentence still maps through the same prefix.
+  assert.equal(
+    getUserFacingMessage('Cannot access contents of url "about:blank". Extension manifest must request permission to access this host.').startsWith('تعذّر حقن سكربت الصفحة'),
+    true,
+  );
+});

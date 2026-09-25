@@ -179,10 +179,15 @@ test('Scheduled Alarm creates a session when Queue has no prior session and repo
 test('Preflight automatically opens X and inspects readiness without publishing', () => {
   assert.match(engineSource, /async function performPreflight/);
   assert.match(engineSource, /state\.queue\.find\(\(item\) => canStartItem\(item\.status\)/);
-  assert.match(engineSource, /chrome\.tabs\.create\(\{ url: 'about:blank', active: false \}\)/);
-  assert.match(engineSource, /chrome\.tabs\.update\(temporary\.id, \{ url: targetUrl, active: false \}\)/);
-  assert.match(engineSource, /await waitForTabLoad\(temporary\.id\)/);
-  assert.match(engineSource, /xInspection = await inspectTab\(temporary\.id\)/);
+  // Issue #18: the temporary X tab is created DIRECTLY at the target URL
+  // (never about:blank), the load wait is URL-gated on the X host pattern,
+  // and the inspection retries until stable — a pre-commit about:blank page
+  // can no longer be misclassified as "not recognized".
+  assert.match(engineSource, /chrome\.tabs\.create\(\{ url: targetUrl, active: false \}\)/);
+  assert.doesNotMatch(engineSource, /chrome\.tabs\.update\(temporary\.id, \{ url: targetUrl, active: false \}\)/);
+  assert.match(engineSource, /await waitForTabLoad\(temporary\.id, 20_000, \{ urlMatches: X_TAB_URL_PATTERN \}\)/);
+  assert.match(engineSource, /xInspection = await inspectTabUntilStable\(temporary\.id\)/);
+  assert.match(engineSource, /backend: executionBackend \}\);/);
   assert.match(serviceWorker, /finally \{\s*if \(temporaryTabId !== undefined\) await chrome\.tabs\.remove/);
   assert.match(uiSource, /preflight\.pressCheck/);
   assert.match(uiSource, /className="preflight-icon"/);
@@ -324,10 +329,15 @@ test('non-exhausted failures schedule a retry instead of recursively retrying', 
 test('automation activates X before readiness polling and restores the previous tab', () => {
   assert.match(engineSource, /chrome\.tabs\.query\(\{ active: true, lastFocusedWindow: true \}\)/);
   assert.match(engineSource, /await chrome\.tabs\.update\(tabId, \{ url: item\.targetUrl, active: false \}\)/);
-  assert.match(engineSource, /await waitForTabLoad\(tabId\);\n    await activateAutomationTab\(tabId\)/);
+  assert.match(engineSource, /await waitForTabUrlChange\(tabId, previousTabUrl\)/);
+  assert.match(engineSource, /await waitForTabLoad\(tabId, 20_000, \{ urlMatches: X_TAB_URL_PATTERN \}\);\n    await activateAutomationTab\(tabId\)/);
   assert.match(engineSource, /export async function activateAutomationTab\(tabId: number\): Promise<void>/);
   assert.match(engineSource, /await restoreActiveTab\(previousActiveTabId\)/);
-  assert.match(engineSource, /if \(tab\.status === 'complete'\) finish\(\)/);
+  // Issue #18: the load wait is poll-based and URL-gated — the event-ordering
+  // sensitive one-shot "complete" check is gone, and a navigation in flight
+  // (pendingUrl) never passes the gate.
+  assert.match(engineSource, /if \(tab\.pendingUrl\) return false;/);
+  assert.doesNotMatch(engineSource, /if \(tab\.status === 'complete'\) finish\(\)/);
 });
 
 test('content injection is guarded per tab and cleaned on tab lifecycle events', () => {

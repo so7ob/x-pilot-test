@@ -148,6 +148,7 @@ Chrome via `chrome://restart`).
 | X login form stalls silently after entering the username (≤ v1.5.3) | The login window exposed `navigator.webdriver === true` (Playwright `--enable-automation`, no anti-automation flags in headed mode) — X's login flow refuses to advance in automation-flagged browsers | **Install v1.5.4** (issue #12: anti-automation launch profile in both modes). |
 | Google sign-in in the login window: «تعذّر تسجيل الدخول — قد يكون هذا المتصفّح أو التطبيق غير آمن» / "This browser or app may not be secure" (≤ v1.5.3) | Google refuses automation-flagged and generic Chromium builds; the X login page offers "Continue with Google" | **Install v1.5.4** — the login window now prefers the installed branded Google Chrome (`channel: 'chrome'`) with automation marks removed. If you have no branded Chrome installed, the runner logs a fallback warning and X's email login still works, but Google sign-in may be refused. |
 | Startup tests / diagnostics fail with `Could not establish connection. Receiving end does not exist.` (≤ v1.5.4) | The extension's content script shipped as an **ES module bundle** in v1.5.0–v1.5.4; MV3 content scripts run as classic scripts, so it crashed with `SyntaxError: Cannot use import statement outside a module` and never installed its message listener (issue #15). All CHROME_TAB-engine checks (X session / Adapter / Composer / post button) then report this raw Chrome error | **Install the v1.5.5 extension package** (the runner package is unchanged) and reload it in chrome://extensions. If you meant to publish through the runner, also select **LOCAL_RUNNER** as the execution engine. |
+| Startup tests: `× X Adapter لم يتعرف على الصفحة` / "The X Adapter did not recognize the page" with everything else passing (≤ v1.5.5) | The CHROME_TAB readiness probe opened its temporary tab on `about:blank`, then could resolve its load wait on the tab's stale "complete" state **before** the X navigation committed, and sent a single X_INSPECT after a fixed 300ms — hitting a page with no content script yet (document_idle registers late) or a not-yet-hydrated page. The same race affected dry run, diagnostics, and the publish tab (issue #18) | **Install the v1.5.6 extension package.** The temporary tab is now created directly at the X URL, the load wait is URL-gated, and the inspection retries until stable. If the check still fails it now prints the actual reason underneath it (in your language) — follow that reason: `تعذّر الوصول إلى سكربت الصفحة…` → reload the extension from chrome://extensions; `X requires login` with the Chrome tab engine → either sign in to X in your daily browser or switch the execution engine to **LOCAL_RUNNER**; `RUNNER_*` codes → see the runner rows above. |
 | Preflight/dry run/publishing drive a tab in your own Chrome although the runner is installed and logged in | The execution engine is still on the default "Chrome tab"; the engine is pinned per session and never switches implicitly | Select **LOCAL_RUNNER** in Side Panel → Settings → Local Runner → Execution engine (v1.5.5 shows a reminder notice right after a successful login setup). |
 | Profile in use (`RUNNER_PROFILE_LOCKED`) | Another process/session owns the profile | Close the other session (or login window) and retry. |
 | Account mismatch (`RUNNER_ACCOUNT_MISMATCH`) | Signed-in account ≠ workspace expected account | Fix the login or update the expected account. |
@@ -175,6 +176,18 @@ Chrome via `chrome://restart`).
   script as a single self-contained IIFE bundle in a dedicated second Vite
   pass; proven by `node --check` classic-script parsing and build contracts.
   Runner-side: zero code changes in this release.
+- v1.5.6 (issue #18): even with the content script healthy, the CHROME_TAB
+  readiness surfaces (startup tests, dry run, diagnostics) could race the tab:
+  the temporary `about:blank` tab's stale "complete" status resolved the load
+  wait before the X navigation committed, and a single X_INSPECT at +300ms hit
+  a page whose content script (document_idle) or composer had not registered
+  yet — surfacing as the opaque `× X Adapter لم يتعرف على الصفحة`. Fixed by
+  creating the temporary tab directly at the X URL, URL-gating the load wait
+  (`X_TAB_URL_PATTERN`, `pendingUrl` never passes), settling reused-tab URL
+  changes, and retrying the inspection until stable; failing checks now print
+  their translated reason. Proven by 22 new behavior/contract tests including
+  two tripwires that fail on the v1.5.5 source (verified by temporarily
+  reverting `src/`). Runner-side: zero code changes in this release.
 - v1.5.4 (issue #12): the login window's automation marks were measured on
   real Chromium (`navigator.webdriver = true` with the v1.5.3 options,
   `undefined` after the fix) and the new `channel: 'chrome'` preference is
