@@ -32,7 +32,8 @@ test('Dry Run has a hard no-publish boundary', () => {
   assert.doesNotMatch(runner, /X_PUBLISH/);
   assert.doesNotMatch(runner, /attempts:/);
   assert.doesNotMatch(runner, /addAttempt/);
-  assert.match(runner, /inspectTab\(tabId\)/);
+  assert.match(runner, /inspectTabUntilStable\(tabId\)/);
+  assert.match(runner, /waitForTabLoad\(tabId, 20_000, \{ urlMatches: X_TAB_URL_PATTERN \}\)/);
 });
 
 test('UI exposes both Dry Run modes and stop control', () => {

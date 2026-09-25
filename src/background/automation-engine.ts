@@ -1,18 +1,18 @@
 import type { AppState, AutomationSession, ContentInspection, RuntimeStatus } from '../domain/models';
 import type { RunnerInspection, RunnerOperationRecord } from '../runner/protocol';
-import { createHistoricalSession } from '../domain/models';
-import { buildStartOverQueue, countStartOverResets, hasFutureRecoveryAlarm, normalizeRecovery } from '../domain/recovery';
-import { canStartItem, getNextPendingItem, getNextRunnableItem } from '../domain/state-machine';
-import { runPreflight } from '../domain/preflight';
-import { getNextAllowedPublishingTime } from '../domain/scheduling';
-import { decideAlarmFailure } from '../domain/alarm-recovery';
+import { createHistoricalSession } from '../domain/models.ts';
+import { buildStartOverQueue, countStartOverResets, hasFutureRecoveryAlarm, normalizeRecovery } from '../domain/recovery.ts';
+import { canStartItem, getNextPendingItem, getNextRunnableItem } from '../domain/state-machine.ts';
+import { runPreflight } from '../domain/preflight.ts';
+import { getNextAllowedPublishingTime } from '../domain/scheduling.ts';
+import { decideAlarmFailure } from '../domain/alarm-recovery.ts';
 import { shouldNeverRepublish } from '../domain/data-integrity.ts';
 import { normalizeExecutionBackend, resolveSessionBackend } from '../domain/execution.ts';
 import { decideRunnerReconciliation } from '../domain/runner-reconciliation.ts';
 import { publishContentFromIntentUrl } from '../domain/intent-url.ts';
 import { localRunnerBridge } from '../runner/local-runner-bridge.ts';
 import { getStoredLocale, formatDateTimeForLocale, translateForLocale } from '../i18n/translate.ts';
-import { acquireStartLock, claimAutomationOwner, getAutomationOwner, getMeta, getSettings, getState as getActiveState, getWorkspaceSettings, getWorkspaceState, listWorkspaces, releaseAutomationOwner, releaseStartLock, renewStartLock, saveHistoricalSession, updateHistoricalSession, updateState as updateActiveState, updateWorkspaceState } from '../storage/storage-repository';
+import { acquireStartLock, claimAutomationOwner, getAutomationOwner, getMeta, getSettings, getState as getActiveState, getWorkspaceSettings, getWorkspaceState, listWorkspaces, releaseAutomationOwner, releaseStartLock, renewStartLock, saveHistoricalSession, updateHistoricalSession, updateState as updateActiveState, updateWorkspaceState } from '../storage/storage-repository.ts';
 
 /**
  * X-Pilot automation engine.
@@ -245,19 +245,75 @@ export async function getOrCreateAutomationTab(session: AutomationSession): Prom
   return tab.id;
 }
 
-export async function waitForTabLoad(tabId: number, timeoutMs = 20000): Promise<void> {
-  await new Promise<void>((resolve, reject) => {
-    let timer: number | undefined;
-    let settled = false;
-    const cleanup = () => { chrome.tabs.onUpdated.removeListener(listener); if (timer) clearTimeout(timer); };
-    const finish = () => { if (settled) return; settled = true; cleanup(); resolve(); };
-    const listener = (updatedTabId: number, changeInfo: { status?: string }) => {
-      if (updatedTabId === tabId && changeInfo.status === 'complete') finish();
-    };
-    chrome.tabs.onUpdated.addListener(listener);
-    void chrome.tabs.get(tabId).then((tab) => { if (tab.status === 'complete') finish(); }).catch(() => undefined);
-    timer = setTimeout(() => { cleanup(); reject(new Error('TAB_LOAD_TIMEOUT')); }, timeoutMs) as unknown as number;
-  });
+/** Matches any http(s) URL on x.com or twitter.com (any subdomain). Used to
+ * gate tab-load waits so a stale "complete" status (about:blank, or an error
+ * page) can never be mistaken for a loaded X page (issue #18). */
+export const X_TAB_URL_PATTERN = /^https?:\/\/(?:[a-z0-9-]+\.)*(?:x\.com|twitter\.com)\//i;
+
+function tabPassesUrlGate(tab: { status?: string; url?: string; pendingUrl?: string } | undefined, urlMatches: RegExp | undefined): boolean {
+  if (!tab || tab.status !== 'complete') return false;
+  // A pendingUrl means a navigation is still in flight — the committed URL
+  // (tab.url) is stale and must not be trusted yet.
+  if (tab.pendingUrl) return false;
+  if (!urlMatches) return true;
+  return urlMatches.test(tab.url ?? '');
+}
+
+/** Waits until the tab reports a loaded page. When `urlMatches` is provided
+ * the wait ALSO requires the committed URL to match, so it can never resolve
+ * on the about:blank "complete" state that precedes the X navigation commit
+ * (the v1.5.5 startup-tests failure). Poll-based on purpose: event ordering
+ * between tabs.onUpdated and tabs.get is not deterministic. */
+export async function waitForTabLoad(tabId: number, timeoutMs = 20000, options: { urlMatches?: RegExp } = {}): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+    if (tabPassesUrlGate(tab, options.urlMatches)) return;
+    if (Date.now() >= deadline) throw new Error('TAB_LOAD_TIMEOUT');
+    await wait(250);
+  }
+}
+
+/** Best-effort settle wait for tab reuse: resolves once the committed URL
+ * moves away from `previousUrl` (a navigation committed). Times out silently
+ * — callers then proceed to the authoritative URL-gated load wait. Prevents
+ * readiness probes from inspecting the PREVIOUS item's page after
+ * chrome.tabs.update (issue #18). */
+export async function waitForTabUrlChange(tabId: number, previousUrl: string | undefined, timeoutMs = 2000): Promise<void> {
+  if (!previousUrl) return;
+  const deadline = Date.now() + timeoutMs;
+  for (;;) {
+    const tab = await chrome.tabs.get(tabId).catch(() => undefined);
+    if (tab && !tab.pendingUrl && tab.url && tab.url !== previousUrl) return;
+    if (Date.now() >= deadline) return;
+    await wait(200);
+  }
+}
+
+/** Bounded-retry readiness inspection for preflight / dry-run / diagnostics.
+ * The content script registers at document_idle — which can land AFTER the
+ * tab reports status "complete" — and X hydrates its composer asynchronously,
+ * so a single early X_INSPECT misclassifies the page as UNKNOWN/ERROR
+ * ("X Adapter did not recognize the page", issue #18). Definite states
+ * (LOGIN / CHALLENGE / daily limit) return immediately; everything else
+ * keeps polling until the deadline, then returns the last classification. */
+export async function inspectTabUntilStable(tabId: number, timeoutMs = 10_000, intervalMs = 400): Promise<ContentInspection> {
+  const deadline = Date.now() + timeoutMs;
+  let last: ContentInspection | undefined;
+  let lastError: unknown;
+  while (Date.now() < deadline) {
+    try {
+      last = await inspectTab(tabId);
+      if (last.ok) return last;
+      if (last.pageKind === 'LOGIN' || last.pageKind === 'CHALLENGE' || last.reason === 'X_DAILY_POST_LIMIT_REACHED') return last;
+    } catch (error) {
+      // The listener may not be registered yet (document_idle) — retry.
+      lastError = error;
+    }
+    await wait(intervalMs);
+  }
+  if (last) return last;
+  throw lastError instanceof Error ? lastError : new Error('PREFLIGHT_X_INSPECTION_FAILED');
 }
 
 export async function getPreviousActiveTabId(tabId: number): Promise<number | undefined> {
@@ -435,8 +491,13 @@ async function processCurrentItem(): Promise<void> {
     }
     tabId = await getOrCreateAutomationTab(session);
     previousActiveTabId = await getPreviousActiveTabId(tabId);
+    // URL settle + URL-gated load wait: the automation tab may be reused from
+    // a previous item, so never trust a stale "complete" status or the old
+    // page while the navigation to this item is still in flight (issue #18).
+    const previousTabUrl = (await chrome.tabs.get(tabId).catch(() => undefined))?.url;
     await chrome.tabs.update(tabId, { url: item.targetUrl, active: false });
-    await waitForTabLoad(tabId);
+    await waitForTabUrlChange(tabId, previousTabUrl);
+    await waitForTabLoad(tabId, 20_000, { urlMatches: X_TAB_URL_PATTERN });
     await activateAutomationTab(tabId);
     await wait(300);
     await waitForPublishReady(tabId);
@@ -600,15 +661,18 @@ export async function performPreflight(workspaceId: string) {
         dailyPostLimitReached: inspection.dailyPostLimitReached,
       };
     } else {
-      const temporary = await chrome.tabs.create({ url: 'about:blank', active: false });
+      // CHROME_TAB: create the temporary tab DIRECTLY at the X target URL
+      // (never about:blank) so the URL-gated load wait below cannot resolve
+      // on a stale about:blank "complete" state before the X navigation
+      // commits — the v1.5.5 startup-tests failure where the first X_INSPECT
+      // landed on a page the adapter could not recognize (issue #18).
+      const temporary = await chrome.tabs.create({ url: targetUrl, active: false });
       if (!temporary.id) throw new Error('PREFLIGHT_X_TAB_CREATE_FAILED');
       temporaryTabId = temporary.id;
       previousActiveTabId = await getPreviousActiveTabId(temporary.id);
-      await chrome.tabs.update(temporary.id, { url: targetUrl, active: false });
-      await waitForTabLoad(temporary.id);
+      await waitForTabLoad(temporary.id, 20_000, { urlMatches: X_TAB_URL_PATTERN });
       await activateAutomationTab(temporary.id);
-      await wait(300);
-      xInspection = await inspectTab(temporary.id);
+      xInspection = await inspectTabUntilStable(temporary.id);
     }
   } catch (error) {
     xInspection = { ok: false, pageKind: 'ERROR', composerFound: false, contentPresent: false, postButtonFound: false, postButtonEnabled: false, reason: error instanceof Error ? error.message : 'PREFLIGHT_X_INSPECTION_FAILED' };
@@ -616,7 +680,7 @@ export async function performPreflight(workspaceId: string) {
     await restoreActiveTab(previousActiveTabId);
     if (temporaryTabId !== undefined) await chrome.tabs.remove(temporaryTabId).catch(() => undefined);
   }
-  return runPreflight({ workspace, queue: state.queue, banks: state.banks, automationWorkspaceId: meta.automationWorkspaceId, alarmsAvailable: Boolean(chrome.alarms), permissionsGranted, settings, xInspection });
+  return runPreflight({ workspace, queue: state.queue, banks: state.banks, automationWorkspaceId: meta.automationWorkspaceId, alarmsAvailable: Boolean(chrome.alarms), permissionsGranted, settings, xInspection, backend: executionBackend });
 }
 
 export async function scheduleSession(workspaceId: string, startAt: number): Promise<AppState> {

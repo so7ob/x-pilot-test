@@ -41,6 +41,11 @@ export const errorTranslationKeys: Record<string, string> = {
   // Mapped so the preflight/dry-run/diagnostics surfaces stay actionable
   // (issue #15).
   'Could not establish connection. Receiving end does not exist.': 'errors.contentScriptUnavailable',
+  // Raw script-injection failure Chrome itself reports (scripting.executeScript
+  // into a page the extension cannot access). Mapped so the preflight x-adapter
+  // reason stays actionable when the fallback injection is the failing link
+  // (issue #18).
+  'Cannot access contents of': 'errors.pageInjectionBlocked',
 };
 
 export function errorTranslationKey(message?: string): string | undefined {

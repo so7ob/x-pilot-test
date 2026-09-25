@@ -6,7 +6,7 @@ import { fingerprintTweet } from '../domain/content-fingerprint';
 import { isTerminalItem } from '../domain/state-machine';
 import { extractLinksFromValues } from '../extraction/bank-parser';
 import { applyBulkStatus, reorderSelected } from '../domain/bulk-queue';
-import { activateAutomationTab, broadcast, cancelScheduledStart, commitQueueMutation, getOrCreateAutomationTab, getPreviousActiveTabId, getState, getRuntimeStatus, inspectTab, pauseSession, performPreflight, recoverPersistedState, reconcileInterruptedRunnerOperations, restoreActiveTab, resumeSession, scheduleSession, startOverSession, startSession, stopSession, updateRuntimeState, wait, waitForTabLoad, ALARM_NAME, SCHEDULE_ALARM_NAME } from './automation-engine';
+import { activateAutomationTab, broadcast, cancelScheduledStart, commitQueueMutation, getOrCreateAutomationTab, getPreviousActiveTabId, getState, getRuntimeStatus, inspectTab, inspectTabUntilStable, pauseSession, performPreflight, recoverPersistedState, reconcileInterruptedRunnerOperations, restoreActiveTab, resumeSession, scheduleSession, startOverSession, startSession, stopSession, updateRuntimeState, waitForTabLoad, waitForTabUrlChange, X_TAB_URL_PATTERN, ALARM_NAME, SCHEDULE_ALARM_NAME } from './automation-engine';
 import { resolveSessionBackend } from '../domain/execution.ts';
 import { publishContentFromIntentUrl } from '../domain/intent-url.ts';
 import { localRunnerBridge } from '../runner/local-runner-bridge.ts';
@@ -79,10 +79,10 @@ async function runDiagnostics(): Promise<DiagnosticsResult> {
         const temporary = await chrome.tabs.create({ url: 'https://x.com/home', active: false });
         if (!temporary.id) throw new Error('DIAGNOSTICS_TAB_CREATE_FAILED');
         temporaryTabId = temporary.id; tabId = temporary.id;
-        await waitForTabLoad(tabId);
+        await waitForTabLoad(tabId, 20_000, { urlMatches: X_TAB_URL_PATTERN });
       }
       result.automationTabId = state?.session?.automationTabId;
-      const inspected = await inspectTab(tabId);
+      const inspected = await inspectTabUntilStable(tabId);
       checks.push({ id: 'x-session', label: 'X Login', status: inspected.pageKind === 'X' ? 'OK' : inspected.pageKind === 'LOGIN' ? 'FAIL' : 'WARN', message: inspected.pageKind === 'X' ? 'X Session: OK' : `X Session: ${inspected.pageKind}`, details: inspected.reason });
       checks.push({ id: 'adapter', label: 'Adapter status', status: inspected.ok ? 'OK' : 'WARN', message: inspected.ok ? 'Adapter status: OK' : 'Adapter status: WARN', details: inspected.reason });
       checks.push({ id: 'composer', label: 'Composer detection', status: inspected.composerFound ? 'OK' : 'WARN', message: inspected.composerFound ? 'Composer detection: OK' : 'Composer detection: WARN' });
@@ -177,11 +177,16 @@ async function runDryRun(mode: 'FIRST_ITEM' | 'ENTIRE_QUEUE', workspaceId?: stri
       try {
         const parsed = new URL(item.targetUrl);
         if (!['http:', 'https:'].includes(parsed.protocol) || !/(^|\.)x\.com$|(^|\.)twitter\.com$/i.test(parsed.hostname)) throw new Error('INVALID_URL');
+        // URL settle + URL-gated load wait + stable inspection: a reused tab
+        // still shows the previous item's page while this navigation is in
+        // flight, and the content script registers at document_idle — a single
+        // early probe misclassified pages as not recognized (issue #18).
+        const previousTabUrl = (await chrome.tabs.get(tabId).catch(() => undefined))?.url;
         await chrome.tabs.update(tabId, { url: item.targetUrl, active: false });
-        await waitForTabLoad(tabId);
+        await waitForTabUrlChange(tabId, previousTabUrl);
+        await waitForTabLoad(tabId, 20_000, { urlMatches: X_TAB_URL_PATTERN });
         await activateAutomationTab(tabId);
-        await wait(300);
-        const inspection = await inspectTab(tabId);
+        const inspection = await inspectTabUntilStable(tabId);
         itemResult = { queueItemId: item.id, position: item.position, targetUrl: item.targetUrl, status: classifyDryRunInspection(inspection), checkedAt: Date.now(), durationMs: Date.now() - started, pageKind: inspection.pageKind, composerFound: inspection.composerFound, contentPresent: inspection.contentPresent, postButtonFound: inspection.postButtonFound, postButtonEnabled: inspection.postButtonEnabled, reason: inspection.reason };
       } catch (error) {
         const reason = error instanceof Error ? error.message : 'UNKNOWN_ERROR';
