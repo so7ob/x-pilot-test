@@ -5,7 +5,7 @@ export interface PreflightCheck { id: string; status: PreflightCheckStatus; mess
 export interface PreflightCounts { total: number; ready: number; published: number; failed: number; skipped: number; duplicates: number; publishedDuplicates: number; invalid: number; }
 export interface PreflightResult { ready: boolean; checkedAt: number; workspaceId: string; summaryKey: string; summaryParams: Record<string, string | number>; checks: PreflightCheck[]; counts: PreflightCounts; }
 
-interface PreflightInput { workspace?: Workspace; queue: QueueItem[]; banks: TweetBank[]; automationWorkspaceId?: string; alarmsAvailable: boolean; permissionsGranted: boolean; settings: Settings; xInspection?: { pageKind: 'X' | 'LOGIN' | 'CHALLENGE' | 'ERROR' | 'UNKNOWN'; composerFound: boolean; contentPresent: boolean; postButtonFound: boolean; postButtonEnabled: boolean; reason?: string } | null; now?: number; }
+interface PreflightInput { workspace?: Workspace; queue: QueueItem[]; banks: TweetBank[]; automationWorkspaceId?: string; alarmsAvailable: boolean; permissionsGranted: boolean; settings: Settings; xInspection?: { pageKind: 'X' | 'LOGIN' | 'CHALLENGE' | 'ERROR' | 'UNKNOWN'; composerFound: boolean; contentPresent: boolean; postButtonFound: boolean; postButtonEnabled: boolean; reason?: string } | null; backend?: 'CHROME_TAB' | 'LOCAL_RUNNER'; now?: number; }
 
 export function runPreflight(input: PreflightInput): PreflightResult {
   const now = input.now ?? Date.now();
@@ -43,10 +43,16 @@ export function runPreflight(input: PreflightInput): PreflightResult {
   add('permissions', input.permissionsGranted ? 'PASS' : 'FAIL', input.permissionsGranted ? 'preflight.permissions' : 'preflight.noPermissions', undefined, undefined, !input.permissionsGranted);
   add('alarms', input.alarmsAvailable ? 'PASS' : 'FAIL', input.alarmsAvailable ? 'preflight.alarms' : 'preflight.noAlarms', undefined, undefined, !input.alarmsAvailable);
   if (!input.xInspection) add('x-adapter', 'WARN', 'preflight.notInspected', 'preflight.queueHint', undefined, false);
-  else if (input.xInspection.pageKind === 'LOGIN') add('x-adapter', 'FAIL', 'preflight.login', undefined, undefined, true);
+  else if (input.xInspection.pageKind === 'LOGIN') {
+    // The login that matters depends on the engine: CHROME_TAB uses the daily
+    // browser session (the runner login lives in a separate browser), while
+    // LOCAL_RUNNER uses the runner profile set up from the Settings card.
+    const loginHint = input.backend === 'CHROME_TAB' ? 'preflight.loginChromeTabHint' : input.backend === 'LOCAL_RUNNER' ? 'preflight.loginRunnerHint' : undefined;
+    add('x-adapter', 'FAIL', 'preflight.login', loginHint, undefined, true);
+  }
   else if (input.xInspection.pageKind === 'CHALLENGE') add('x-adapter', 'FAIL', 'preflight.challenge', undefined, undefined, true);
-  else if (input.xInspection.pageKind !== 'X') add('x-adapter', 'FAIL', 'preflight.adapter', undefined, undefined, true);
-  else if (!input.xInspection.composerFound || !input.xInspection.postButtonFound || !input.xInspection.postButtonEnabled) add('x-adapter', 'FAIL', 'preflight.composer', undefined, undefined, true);
+  else if (input.xInspection.pageKind !== 'X') add('x-adapter', 'FAIL', 'preflight.adapter', 'preflight.adapterReason', { reason: input.xInspection.reason ?? 'UNKNOWN_PAGE' }, true);
+  else if (!input.xInspection.composerFound || !input.xInspection.postButtonFound || !input.xInspection.postButtonEnabled) add('x-adapter', 'FAIL', 'preflight.composer', 'preflight.adapterReason', { reason: input.xInspection.reason ?? 'PUBLISH_CONTROLS_NOT_READY' }, true);
   else add('x-adapter', 'PASS', 'preflight.adapterReady', undefined, undefined, false);
 
   const blockingFailures = checks.filter((check) => check.status === 'FAIL' && check.blocking);
